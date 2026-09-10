@@ -26,7 +26,9 @@ if '"""' in html:
     raise SystemExit("dashboard.html 에 삼중따옴표가 있으면 안 됩니다 (raw string 으로 박음).")
 
 out = server.replace("@@CORE@@", core).replace("@@HTML@@", html)
-OUT.write_text(out, encoding="utf-8")
+# newline 을 지정하지 않으면 Windows 에서 CRLF 로 써서 산출물이 통째로 달라 보인다
+with OUT.open("w", encoding="utf-8", newline="\n") as f:
+    f.write(out)
 
 compile(out, str(OUT), "exec")   # 문법 확인
 print("wrote %s (%.0f KB)" % (OUT, OUT.stat().st_size / 1024))
