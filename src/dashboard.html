@@ -1,0 +1,1350 @@
+<title>Claude 토큰 미터</title>
+
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap">
+
+<style>
+/* ---------- tokens: warm-paper ledger, cool blue instrument accent ---------- */
+:root {
+  color-scheme: light;
+  --paper:      #faf9f4;
+  --panel:      #ffffff;
+  --panel-sunk: #f2f0e8;
+  --rule:       #e4e1d6;
+  --rule-soft:  #eeece3;
+  --ink:        #1a1915;
+  --ink-2:      #55524699;
+  --ink-mute:   #6b6759;
+  --accent:     #2a78d6;
+  --accent-dim: #2a78d61a;
+
+  --s1: #2a78d6;  /* 캐시 읽기 */
+  --s2: #eb6834;  /* 캐시 쓰기 */
+  --s3: #1baf7a;  /* 입력 */
+  --s4: #eda100;  /* 출력 */
+  --s5: #e87ba4;
+  --s6: #008300;
+  --s7: #4a3aa7;
+  --s8: #e34948;
+
+  --heat-0: #f2f0e8;
+  --heat-1: #cde2fb;
+  --heat-2: #9ec5f4;
+  --heat-3: #6da7ec;
+  --heat-4: #3987e5;
+  --heat-5: #256abf;
+  --heat-6: #104281;
+
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --sans: "IBM Plex Sans KR", "IBM Plex Sans", -apple-system, BlinkMacSystemFont,
+          "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --paper:      #14140f;
+    --panel:      #1c1c18;
+    --panel-sunk: #24241f;
+    --rule:       #33322c;
+    --rule-soft:  #2a2a24;
+    --ink:        #f3f1e8;
+    --ink-2:      #a5a29799;
+    --ink-mute:   #a5a297;
+    --accent:     #3987e5;
+    --accent-dim: #3987e526;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+    --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+    --heat-0: #24241f;
+    --heat-1: #184f95; --heat-2: #1c5cab; --heat-3: #256abf;
+    --heat-4: #3987e5; --heat-5: #6da7ec; --heat-6: #9ec5f4;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper:      #14140f;
+  --panel:      #1c1c18;
+  --panel-sunk: #24241f;
+  --rule:       #33322c;
+  --rule-soft:  #2a2a24;
+  --ink:        #f3f1e8;
+  --ink-2:      #a5a29799;
+  --ink-mute:   #a5a297;
+  --accent:     #3987e5;
+  --accent-dim: #3987e526;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+  --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+  --heat-0: #24241f;
+  --heat-1: #184f95; --heat-2: #1c5cab; --heat-3: #256abf;
+  --heat-4: #3987e5; --heat-5: #6da7ec; --heat-6: #9ec5f4;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1120px; margin: 0 auto; padding: 28px 22px 72px; }
+
+/* ---------- ledger primitives ---------- */
+.lbl {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.hr { height: 1px; background: var(--rule); border: 0; margin: 0; }
+
+/* ---------- header ---------- */
+header { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 18px 26px; padding-bottom: 16px; }
+h1 { font-size: 19px; font-weight: 600; letter-spacing: -.01em; margin: 0 0 2px; }
+.sub { color: var(--ink-mute); font-size: 12.5px; margin: 0; }
+.head-meta { margin-left: auto; text-align: right; }
+
+/* meter reading */
+.meter { display: flex; align-items: baseline; gap: 10px; margin-top: 4px; }
+.meter b {
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+  font-size: 40px; font-weight: 500; letter-spacing: -.02em; line-height: 1;
+}
+.meter span { font-family: var(--mono); font-size: 13px; color: var(--ink-mute); }
+
+/* ---------- controls ---------- */
+.bar {
+  display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+  padding: 12px 0; border-bottom: 1px solid var(--rule);
+}
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; background: var(--panel); }
+.seg button {
+  font: inherit; font-family: var(--mono); font-size: 11.5px;
+  padding: 5px 11px; border: 0; background: none; color: var(--ink-mute); cursor: pointer;
+  border-right: 1px solid var(--rule);
+}
+.seg button:last-child { border-right: 0; }
+.seg button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+.seg button:hover:not([aria-pressed="true"]) { background: var(--panel-sunk); color: var(--ink); }
+
+.chip {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-family: var(--mono); font-size: 11.5px;
+  padding: 4px 10px 4px 8px; border: 1px solid var(--rule); border-radius: 999px;
+  background: var(--panel); color: var(--ink); cursor: pointer;
+}
+.chip .dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.chip[aria-pressed="false"] { opacity: .42; }
+.chip:focus-visible, .seg button:focus-visible, .btn:focus-visible, .drop:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+.spacer { margin-left: auto; }
+.btn {
+  font: inherit; font-family: var(--mono); font-size: 11.5px;
+  padding: 5px 12px; border: 1px solid var(--rule); border-radius: 6px;
+  background: var(--panel); color: var(--ink); cursor: pointer;
+}
+.btn:hover { background: var(--panel-sunk); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn:disabled { opacity: .45; cursor: default; }
+
+/* ---------- banner ---------- */
+.banner {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  margin: 14px 0 0; padding: 9px 13px;
+  border: 1px dashed var(--rule); border-radius: 8px;
+  background: var(--panel-sunk); color: var(--ink-mute); font-size: 12.5px;
+}
+.banner b { color: var(--ink); font-weight: 600; }
+
+/* ---------- stat row ---------- */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 0; margin: 22px 0 0; }
+.stat { padding: 2px 16px 2px 0; border-left: 1px solid var(--rule-soft); padding-left: 16px; }
+.stats > .stat:first-child { border-left: 0; padding-left: 0; }
+.stat .v { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 22px; font-weight: 500; letter-spacing: -.01em; display: block; margin-top: 3px; }
+.stat .u { font-size: 11.5px; color: var(--ink-mute); font-family: var(--mono); }
+
+/* ---------- sections ---------- */
+section { margin-top: 34px; }
+.sec-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; }
+.sec-head h2 { font-size: 14px; font-weight: 600; margin: 0; letter-spacing: -.005em; }
+.sec-head .note { font-size: 12px; color: var(--ink-mute); margin-left: auto; font-family: var(--mono); }
+
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 34px; }
+@media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; gap: 30px; } }
+
+/* ---------- charts ---------- */
+.chartbox { position: relative; }
+.chartbox svg { display: block; width: 100%; height: auto; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 10px; }
+.legend i { display: inline-flex; align-items: center; gap: 6px; font-style: normal; font-family: var(--mono); font-size: 11px; color: var(--ink-mute); }
+.legend i b { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+
+.tip {
+  position: absolute; pointer-events: none; z-index: 5;
+  background: var(--panel); border: 1px solid var(--rule); border-radius: 7px;
+  padding: 8px 10px; font-size: 12px; min-width: 128px;
+  box-shadow: 0 6px 20px #0000001f;
+  transition: opacity .08s linear;
+}
+.tip[hidden] { display: none; }
+.tip .t-day { font-family: var(--mono); font-size: 11px; color: var(--ink-mute); letter-spacing: .04em; }
+.tip .t-tot { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 16px; font-weight: 500; margin: 1px 0 6px; }
+.tip table { border-collapse: collapse; width: 100%; }
+.tip td { padding: 1px 0; font-size: 11.5px; }
+.tip td:last-child { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; padding-left: 14px; }
+.tip .sw { width: 8px; height: 8px; border-radius: 2px; display: inline-block; margin-right: 6px; }
+
+/* ---------- composition bar ---------- */
+.comp { display: flex; height: 34px; border-radius: 5px; overflow: hidden; gap: 2px; background: var(--paper); }
+.comp > div { min-width: 2px; }
+.comp-rows { margin-top: 12px; }
+
+/* ---------- ledger table ---------- */
+table.ledger { width: 100%; border-collapse: collapse; }
+table.ledger th {
+  text-align: left; font-family: var(--mono); font-size: 10.5px; font-weight: 500;
+  letter-spacing: .12em; text-transform: uppercase; color: var(--ink-mute);
+  padding: 0 0 7px; border-bottom: 1px solid var(--rule); white-space: nowrap;
+}
+table.ledger td { padding: 9px 0; border-bottom: 1px solid var(--rule-soft); vertical-align: middle; }
+table.ledger th + th, table.ledger td + td { padding-left: 18px; }
+table.ledger th.r, table.ledger td.r { text-align: right; }
+table.ledger td.r { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+table.ledger td.mut { color: var(--ink-mute); font-size: 12.5px; }
+.tbl-scroll { overflow-x: auto; }
+.mname { display: flex; align-items: center; gap: 9px; }
+.mname .dot { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+.mname small { display: block; color: var(--ink-mute); font-size: 11px; font-family: var(--mono); line-height: 1.3; }
+.spark { width: 108px; height: 24px; display: block; }
+.mini { height: 6px; background: var(--panel-sunk); border-radius: 3px; overflow: hidden; min-width: 60px; }
+.mini > i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+.stale { color: var(--s2); }
+
+/* ---------- heatmap ---------- */
+.heat { display: grid; grid-template-columns: 26px repeat(24, 1fr); gap: 3px; align-items: center; }
+.heat .hl { font-family: var(--mono); font-size: 10px; color: var(--ink-mute); }
+.heat .cell { aspect-ratio: 1; border-radius: 2px; background: var(--heat-0); }
+.heat-x { display: grid; grid-template-columns: 26px repeat(24, 1fr); gap: 3px; margin-top: 5px; }
+.heat-x span { font-family: var(--mono); font-size: 9.5px; color: var(--ink-mute); text-align: center; }
+.heat-wrap { overflow-x: auto; }
+.heat-inner { min-width: 560px; }
+
+/* ---------- drop zone ---------- */
+.drop {
+  border: 1px dashed var(--rule); border-radius: 10px; padding: 22px;
+  text-align: center; color: var(--ink-mute); background: var(--panel-sunk);
+  cursor: pointer; font-size: 13px;
+}
+.drop.over { border-color: var(--accent); background: var(--accent-dim); color: var(--ink); }
+.drop code { font-family: var(--mono); font-size: 12px; color: var(--ink); }
+.hint { font-size: 12px; color: var(--ink-mute); margin: 8px 0 0; }
+.hint code { font-family: var(--mono); background: var(--panel-sunk); padding: 1px 5px; border-radius: 4px; }
+
+footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule); color: var(--ink-mute); font-size: 12px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+
+<div class="wrap">
+
+  <header>
+    <div>
+      <h1>Claude 토큰 미터</h1>
+      <p class="sub">여러 PC·서버의 Claude Code 사용량을 하나의 계량기로</p>
+    </div>
+    <div class="head-meta">
+      <div class="lbl">누적 검침값</div>
+      <div class="meter"><b id="meterTotal">—</b><span id="meterUnit">tokens</span></div>
+      <div class="lbl" id="meterRange" style="margin-top:4px">—</div>
+    </div>
+  </header>
+
+  <div class="bar">
+    <div class="seg" role="group" aria-label="기간">
+      <button data-range="7" aria-pressed="false">7일</button>
+      <button data-range="30" aria-pressed="false">30일</button>
+      <button data-range="90" aria-pressed="false">90일</button>
+      <button data-range="all" aria-pressed="true">전체</button>
+    </div>
+    <div id="machineChips" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+    <div class="spacer"></div>
+    <button class="btn" id="btnAdd">+ 수집 파일 불러오기</button>
+    <button class="btn" id="btnSync" hidden>이 대시보드에 저장</button>
+    <button class="btn" id="btnExport" hidden>내보내기</button>
+    <input type="file" id="fileInput" accept=".json,application/json" multiple hidden>
+  </div>
+
+  <div class="banner" id="banner" hidden></div>
+
+  <div class="stats" id="stats"></div>
+
+  <section>
+    <div class="sec-head">
+      <h2>일별 사용량</h2>
+      <div class="note" id="dailyNote"></div>
+    </div>
+    <div class="chartbox" id="dailyBox">
+      <svg id="dailySvg" role="img" aria-label="머신별 일일 토큰 사용량 누적 막대 차트"></svg>
+      <div class="tip" id="dailyTip" hidden></div>
+    </div>
+    <div class="legend" id="dailyLegend"></div>
+  </section>
+
+  <section class="grid2">
+    <div>
+      <div class="sec-head">
+        <h2>토큰 구성</h2>
+        <div class="note">입·출력 vs 캐시</div>
+      </div>
+      <div class="comp" id="comp"></div>
+      <div class="comp-rows">
+        <table class="ledger" id="compTable"></table>
+      </div>
+      <p class="hint" id="compNote"></p>
+    </div>
+    <div>
+      <div class="sec-head">
+        <h2>모델별</h2>
+        <div class="note" id="modelNote"></div>
+      </div>
+      <table class="ledger" id="modelTable"></table>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>머신별</h2>
+      <div class="note" id="machineNote"></div>
+    </div>
+    <div class="tbl-scroll">
+      <table class="ledger" id="machineTable"></table>
+    </div>
+  </section>
+
+  <section class="grid2">
+    <div>
+      <div class="sec-head">
+        <h2>프로젝트별</h2>
+        <div class="note">상위 8개</div>
+      </div>
+      <div class="tbl-scroll">
+        <table class="ledger" id="projectTable"></table>
+      </div>
+    </div>
+    <div>
+      <div class="sec-head">
+        <h2>사용 시간대</h2>
+        <div class="note" id="heatNote"></div>
+      </div>
+      <div class="heat-wrap"><div class="heat-inner">
+        <div class="heat" id="heat"></div>
+        <div class="heat-x" id="heatX"></div>
+      </div></div>
+    </div>
+  </section>
+
+  <section id="loadSection">
+    <div class="sec-head"><h2>데이터 연결</h2></div>
+    <div class="drop" id="drop" tabindex="0" role="button"
+         aria-label="수집 JSON 파일 불러오기">
+      각 PC·서버에서 <code>claude-usage-collect.py</code>를 돌려 만든 JSON을
+      여기에 끌어다 놓거나 클릭해서 선택하세요.
+    </div>
+    <p class="hint">
+      수집: <code>python3 claude-usage-collect.py --machine "집-데스크탑"</code> ·
+      머신 id가 같은 파일을 다시 넣으면 최신 스냅샷으로 교체됩니다.
+    </p>
+  </section>
+
+  <footer>
+    <div id="diag" class="lbl" style="margin-bottom:10px;letter-spacing:.08em"></div>
+    수치는 Claude Code가 <code style="font-family:var(--mono)">~/.claude/projects</code>의 세션 트랜스크립트에 직접 기록한
+    토큰 값을 합산한 것입니다. Anthropic의 청구·한도 기준 수치가 아니며,
+    트랜스크립트가 정리·삭제된 기간은 집계에서 빠집니다.
+  </footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var SERIES = ["--s1","--s2","--s3","--s4","--s5","--s6","--s7","--s8"];
+  var COMP = [
+    { k: "cr", name: "캐시 읽기", v: "--s1" },
+    { k: "cw", name: "캐시 쓰기", v: "--s2" },
+    { k: "i",  name: "입력",      v: "--s3" },
+    { k: "o",  name: "출력",      v: "--s4" }
+  ];
+  var WD = ["월","화","수","목","금","토","일"];
+
+  var state = { machines: {}, off: {}, range: "all", sample: true, db: null,
+               dirty: {}, scanning: false, scanElapsed: 0 };
+
+  // ------------------------------------------------------------ formatting
+  function fmt(n) {
+    n = n || 0;
+    if (n >= 1e9) return (n / 1e9).toFixed(n >= 1e10 ? 0 : 1) + "B";
+    if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + "M";
+    if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + "K";
+    return String(Math.round(n));
+  }
+  function comma(n) { return (n || 0).toLocaleString("ko-KR"); }
+  function pct(a, b) { return b ? (a / b * 100) : 0; }
+  var _cv = {};
+  function cvar(name) {
+    if (!(name in _cv)) {
+      _cv[name] = getComputedStyle(document.documentElement)
+        .getPropertyValue(name).trim() || "#888";
+    }
+    return _cv[name];
+  }
+  function dropStyleCache() { _cv = {}; _colorCache = null; }
+  function el(tag, cls, txt) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (txt != null) e.textContent = txt;
+    return e;
+  }
+  function svgEl(tag, attrs) {
+    var e = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (var k in attrs) if (attrs[k] != null) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+  function shortModel(m) {
+    return String(m).replace(/-2\d{7}$/, "").replace(/^claude-/, "");
+  }
+  // 날짜는 전부 UTC 기준으로 다룬다.
+  // "YYYY-MM-DDT00:00:00" 은 로컬로 파싱되는데 toISOString() 은 UTC로 되돌리므로,
+  // UTC+9 같은 곳에서는 하루를 더해도 같은 날짜가 나와 루프가 끝나지 않는다.
+  function dayKey(d) {
+    return d.getUTCFullYear() + "-" +
+      ("0" + (d.getUTCMonth() + 1)).slice(-2) + "-" +
+      ("0" + d.getUTCDate()).slice(-2);
+  }
+  function dayParse(iso) { return new Date(iso.slice(0, 10) + "T00:00:00Z"); }
+  function dayAdd(iso, n) {
+    var d = dayParse(iso);
+    d.setUTCDate(d.getUTCDate() + n);
+    return dayKey(d);
+  }
+  function weekdayOf(iso) {           // 0=월 … 6=일
+    return (dayParse(iso).getUTCDay() + 6) % 7;
+  }
+  function todayKey() {
+    var n = new Date();
+    return n.getFullYear() + "-" +
+      ("0" + (n.getMonth() + 1)).slice(-2) + "-" +
+      ("0" + n.getDate()).slice(-2);   // 사용자가 보는 '오늘'은 로컬 기준
+  }
+  function relDays(iso) {
+    if (!iso) return null;
+    return Math.round((dayParse(todayKey()) - dayParse(iso)) / 86400000);
+  }
+
+  // ------------------------------------------------------------ sample data
+  function makeSample() {
+    var seed = 20260909;
+    function rnd() { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; }
+    var specs = [
+      { id: "sample-a", label: "회사-노트북", os: "macOS 15", days: 210, w: 1.0, hours: [9,10,11,13,14,15,16,17] },
+      { id: "sample-b", label: "집-데스크탑", os: "Windows 11", days: 210, w: 0.55, hours: [20,21,22,23,0,1] },
+      { id: "sample-c", label: "빌드-서버",   os: "Ubuntu 24.04", days: 120, w: 0.3, hours: [2,3,4,9,14] }
+    ];
+    var models = [
+      ["claude-opus-5-20260401", 0.5],
+      ["claude-sonnet-4-5-20250929", 0.38],
+      ["claude-haiku-4-5-20251001", 0.12]
+    ];
+    var projects = ["moonlog", "bookapp", "api-gateway", "scratch", "etl-jobs"];
+    var today = todayKey();
+    return specs.map(function (s) {
+      var daily = {}, dailyModels = {}, mAgg = {}, pAgg = {}, hours = new Array(24).fill(0);
+      var wh = []; for (var q = 0; q < 7; q++) wh.push(new Array(24).fill(0));
+      var sessions = 0, first = null;
+      for (var d = s.days; d >= 0; d--) {
+        var day = dayAdd(today, -d);
+        var wd = weekdayOf(day);
+        var idle = rnd() < (wd >= 5 ? 0.55 : 0.16) * (2 - s.w);
+        if (idle) continue;
+        if (!first) first = day;
+        var ramp = 0.45 + 0.55 * (1 - d / s.days);
+        var msgs = Math.round((14 + rnd() * 70) * s.w * ramp);
+        var cr = Math.round(msgs * (32000 + rnd() * 46000));
+        var cw = Math.round(msgs * (900 + rnd() * 2600));
+        var ip = Math.round(msgs * (18 + rnd() * 42));
+        var op = Math.round(msgs * (240 + rnd() * 720));
+        var ses = 1 + Math.round(rnd() * 3 * s.w);
+        sessions += ses;
+        daily[day] = { i: ip, o: op, cw: cw, cr: cr, m: msgs, s: ses };
+        var mi = rnd(); var acc = 0, mm = models[0][0];
+        for (var k = 0; k < models.length; k++) { acc += models[k][1]; if (mi <= acc) { mm = models[k][0]; break; } }
+        dailyModels[day] = {}; dailyModels[day][mm] = ip + op + cw + cr;
+        var b = mAgg[mm] || (mAgg[mm] = { i: 0, o: 0, cw: 0, cr: 0, m: 0 });
+        b.i += ip; b.o += op; b.cw += cw; b.cr += cr; b.m += msgs;
+        var pn = projects[Math.floor(rnd() * projects.length)];
+        var pb = pAgg[pn] || (pAgg[pn] = { i: 0, o: 0, cw: 0, cr: 0, m: 0, last: day });
+        pb.i += ip; pb.o += op; pb.cw += cw; pb.cr += cr; pb.m += msgs; pb.last = day;
+        for (var h = 0; h < msgs; h++) {
+          var hh = s.hours[Math.floor(rnd() * s.hours.length)];
+          hours[hh]++; wh[wd][hh]++;
+        }
+      }
+      var tot = { i: 0, o: 0, cw: 0, cr: 0, m: 0 };
+      Object.keys(daily).forEach(function (d2) {
+        ["i","o","cw","cr","m"].forEach(function (k2) { tot[k2] += daily[d2][k2]; });
+      });
+      tot.total = tot.i + tot.o + tot.cw + tot.cr;
+      tot.sessions = sessions;
+      tot.active_days = Object.keys(daily).length;
+      return {
+        schema: 1, sample: true,
+        generated_at: new Date(Date.now() - Math.floor(rnd() * 5) * 3600000).toISOString(),
+        tz: "Asia/Seoul",
+        machine: { id: s.id, label: s.label, hostname: s.id, os: s.os },
+        range: { first: first, last: today },
+        totals: tot, daily: daily, daily_models: dailyModels,
+        models: mAgg, projects: pAgg, hours: hours, weekday_hour: wh
+      };
+    });
+  }
+
+  // ------------------------------------------------------------ derive
+  function activeMachines() {
+    return Object.keys(state.machines)
+      .filter(function (id) { return !state.off[id]; })
+      .sort(function (a, b) {
+        return (state.machines[b].totals.total || 0) - (state.machines[a].totals.total || 0);
+      });
+  }
+  function allMachines() {
+    return Object.keys(state.machines).sort(function (a, b) {
+      return (state.machines[b].totals.total || 0) - (state.machines[a].totals.total || 0);
+    });
+  }
+  var _colorCache = null;
+  function colorOf(id) {
+    if (!_colorCache) {
+      _colorCache = {};
+      allMachines().forEach(function (m, i) {
+        _colorCache[m] = cvar(SERIES[i % SERIES.length]);
+      });
+    }
+    return _colorCache[id] || cvar(SERIES[0]);
+  }
+
+  function derive() {
+    var ids = activeMachines();
+    var lastDay = null;
+    ids.forEach(function (id) {
+      var r = state.machines[id].range || {};
+      if (r.last && (!lastDay || r.last > lastDay)) lastDay = r.last;
+    });
+    var today = todayKey();
+    var endDay = lastDay && lastDay > today ? lastDay : today;
+    var from = null;
+    if (state.range !== "all") from = dayAdd(endDay, -(parseInt(state.range, 10) - 1));
+
+    var daySet = {};
+    ids.forEach(function (id) {
+      Object.keys(state.machines[id].daily || {}).forEach(function (d) {
+        if (!from || d >= from) daySet[d] = 1;
+      });
+    });
+    var days = Object.keys(daySet).sort();
+
+    // continuous axis for fixed windows
+    var axis = days;
+    if (from) {
+      axis = [];
+      var d = from;
+      var guard = 4000;                    // 날짜 계산이 어긋나도 멈추지 않도록
+      while (d <= endDay && guard-- > 0) {
+        axis.push(d);
+        var next = dayAdd(d, 1);
+        if (next <= d) break;              // 전진하지 않으면 즉시 중단
+        d = next;
+      }
+    }
+
+    var rows = axis.map(function (day) {
+      var per = {}, tot = 0, msgs = 0, ses = 0;
+      ids.forEach(function (id) {
+        var b = (state.machines[id].daily || {})[day];
+        if (!b) return;
+        var t = (b.i || 0) + (b.o || 0) + (b.cw || 0) + (b.cr || 0);
+        if (t) per[id] = t;
+        tot += t; msgs += b.m || 0; ses += b.s || 0;
+      });
+      return { day: day, per: per, total: tot, msgs: msgs, sessions: ses };
+    });
+
+    var comp = { i: 0, o: 0, cw: 0, cr: 0 }, msgs = 0, sessions = 0;
+    var models = {}, projects = {}, hours = new Array(24).fill(0);
+    var wh = []; for (var q = 0; q < 7; q++) wh.push(new Array(24).fill(0));
+    var inWindow = !!from;
+
+    ids.forEach(function (id) {
+      var M = state.machines[id];
+      Object.keys(M.daily || {}).forEach(function (day) {
+        if (from && day < from) return;
+        var b = M.daily[day];
+        comp.i += b.i || 0; comp.o += b.o || 0; comp.cw += b.cw || 0; comp.cr += b.cr || 0;
+        msgs += b.m || 0; sessions += b.s || 0;
+        var dm = (M.daily_models || {})[day] || {};
+        Object.keys(dm).forEach(function (mo) { models[mo] = (models[mo] || 0) + dm[mo]; });
+      });
+      // 프로젝트·시간대는 머신 전체 집계만 제공되므로 창 필터 시 근사 비율을 적용
+      var scale = 1;
+      if (inWindow) {
+        var win = 0, all = M.totals.total || 0;
+        Object.keys(M.daily || {}).forEach(function (day) {
+          if (day < from) return;
+          var b = M.daily[day];
+          win += (b.i || 0) + (b.o || 0) + (b.cw || 0) + (b.cr || 0);
+        });
+        scale = all ? win / all : 0;
+      }
+      Object.keys(M.projects || {}).forEach(function (p) {
+        var b = M.projects[p];
+        var t = ((b.i || 0) + (b.o || 0) + (b.cw || 0) + (b.cr || 0)) * scale;
+        var e = projects[p] || (projects[p] = { t: 0, m: 0, last: null });
+        e.t += t; e.m += (b.m || 0) * scale;
+        if (b.last && (!e.last || b.last > e.last)) e.last = b.last;
+      });
+      (M.hours || []).forEach(function (v, h) { hours[h] += v * scale; });
+      (M.weekday_hour || []).forEach(function (row, w) {
+        (row || []).forEach(function (v, h) { wh[w][h] += v * scale; });
+      });
+    });
+
+    var total = comp.i + comp.o + comp.cw + comp.cr;
+    var active = rows.filter(function (r) { return r.total > 0; });
+    var streak = 0, best = 0, run = 0, prev = null;
+    active.forEach(function (r) {
+      run = (prev && dayAdd(prev, 1) === r.day) ? run + 1 : 1;
+      if (run > best) best = run;
+      prev = r.day;
+    });
+    if (prev && (relDays(prev) <= 1)) streak = run;
+
+    return {
+      ids: ids, rows: rows, active: active, total: total, comp: comp,
+      msgs: msgs, sessions: sessions, models: models, projects: projects,
+      hours: hours, wh: wh, streak: streak, best: best, approx: inWindow,
+      first: active.length ? active[0].day : null,
+      last: active.length ? active[active.length - 1].day : null
+    };
+  }
+
+  // ------------------------------------------------------------ render
+  var lastTiming = "";
+  function render() {
+    var t0 = (window.performance || Date).now();
+    dropStyleCache();
+    var D = derive();
+    var t1 = (window.performance || Date).now();
+    renderHeader(D);
+    renderChips();
+    renderStats(D);
+    renderDaily(D);
+    renderComp(D);
+    renderModels(D);
+    renderMachines(D);
+    renderProjects(D);
+    renderHeat(D);
+    renderBanner();
+    document.getElementById("btnExport").hidden = state.sample;
+    var t2 = (window.performance || Date).now();
+
+    var days = 0, projects = {}, models = {};
+    Object.keys(state.machines).forEach(function (id) {
+      var M = state.machines[id];
+      days += Object.keys(M.daily || {}).length;
+      Object.keys(M.projects || {}).forEach(function (k) { projects[k] = 1; });
+      Object.keys(M.models || {}).forEach(function (k) { models[k] = 1; });
+    });
+    lastTiming =
+      "계산 " + (t1 - t0).toFixed(0) + "ms · 그리기 " + (t2 - t1).toFixed(0) + "ms · " +
+      "머신 " + Object.keys(state.machines).length + " · 일자 " + days + " · " +
+      "프로젝트 " + Object.keys(projects).length + " · 모델 " + Object.keys(models).length;
+    var dg = document.getElementById("diag");
+    if (dg) dg.textContent = lastTiming;
+    if (window.console && window.console.log) console.log("[토큰미터] " + lastTiming);
+  }
+
+  function renderHeader(D) {
+    document.getElementById("meterTotal").textContent = fmt(D.total);
+    document.getElementById("meterUnit").textContent = "tokens · " + comma(Math.round(D.total));
+    document.getElementById("meterRange").textContent =
+      D.first ? (D.first + " → " + D.last) : "데이터 없음";
+  }
+
+  function renderBanner() {
+    var b = document.getElementById("banner");
+    b.textContent = "";
+    if (state.scanning) {
+      b.hidden = false;
+      b.appendChild(el("b", null, "처음 스캔 중"));
+      var n = Math.round(state.scanElapsed || 0);
+      b.appendChild(document.createTextNode(
+        " — 트랜스크립트 전체를 읽고 있습니다 (" + n + "초 경과). "
+        + "끝나면 자동으로 화면이 채워집니다. 갱신은 백그라운드에서 돌기 때문에 "
+        + "이후로는 화면이 멈추지 않습니다."));
+      return;
+    }
+    if (state.sample) {
+      b.hidden = false;
+      b.appendChild(el("b", null, "예시 데이터"));
+      b.appendChild(document.createTextNode(
+        "입니다 — 실제 수치가 아닙니다. 아래에서 수집 JSON을 불러오면 예시는 사라집니다."));
+      return;
+    }
+    var stale = allMachines().filter(function (id) {
+      var r = relDays((state.machines[id].generated_at || "").slice(0, 10));
+      return r != null && r >= 2;
+    });
+    if (stale.length) {
+      b.hidden = false;
+      b.appendChild(el("b", null, "오래된 스냅샷"));
+      b.appendChild(document.createTextNode(
+        " — " + stale.map(function (id) { return state.machines[id].machine.label; }).join(", ") +
+        " 은(는) 2일 이상 갱신되지 않았습니다. 해당 머신에서 수집기를 다시 실행하세요."));
+      return;
+    }
+    b.hidden = true;
+  }
+
+  function renderChips() {
+    var box = document.getElementById("machineChips");
+    box.textContent = "";
+    var ids = allMachines();
+    if (ids.length < 2) return;
+    ids.forEach(function (id) {
+      var on = !state.off[id];
+      var c = el("button", "chip");
+      c.type = "button";
+      c.setAttribute("aria-pressed", on ? "true" : "false");
+      var dot = el("span", "dot");
+      dot.style.background = colorOf(id);
+      c.appendChild(dot);
+      c.appendChild(document.createTextNode(state.machines[id].machine.label));
+      c.onclick = function () {
+        if (on && activeMachines().length === 1) return;
+        state.off[id] = on; render();
+      };
+      box.appendChild(c);
+    });
+  }
+
+  function renderStats(D) {
+    var box = document.getElementById("stats");
+    box.textContent = "";
+    var items = [
+      ["활성 일수", String(D.active.length), "일"],
+      ["연속", D.streak + " / " + D.best, "현재 / 최장"],
+      ["세션", comma(D.sessions), ""],
+      ["메시지", comma(D.msgs), ""],
+      ["머신", String(D.ids.length) + " / " + allMachines().length, "활성 / 전체"],
+      ["일 평균", fmt(D.active.length ? D.total / D.active.length : 0), "tokens"]
+    ];
+    items.forEach(function (it) {
+      var s = el("div", "stat");
+      s.appendChild(el("div", "lbl", it[0]));
+      s.appendChild(el("span", "v", it[1]));
+      if (it[2]) s.appendChild(el("span", "u", it[2]));
+      box.appendChild(s);
+    });
+  }
+
+  // ---- daily stacked bars
+  var dailyGeom = null;
+  function renderDaily(D) {
+    var box = document.getElementById("dailyBox");
+    var svg = document.getElementById("dailySvg");
+    var W = Math.max(320, box.clientWidth || 900);
+    _lastW = box.clientWidth || W;
+    var H = 240;
+    var padL = 46, padR = 10, padT = 12, padB = 26;
+    var iw = W - padL - padR, ih = H - padT - padB;
+    svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+    svg.setAttribute("height", H);
+    svg.textContent = "";
+
+    var rows = D.rows;
+    document.getElementById("dailyNote").textContent =
+      rows.length ? rows.length + "일 · 머신별 누적" : "";
+
+    if (!rows.length) { dailyGeom = null; return; }
+
+    var max = 0;
+    rows.forEach(function (r) { if (r.total > max) max = r.total; });
+    if (max <= 0) max = 1;
+    var step = Math.pow(10, Math.floor(Math.log10(max)));
+    var top = Math.ceil(max / step) * step;
+    if (top / max > 1.6) top = Math.ceil(max / (step / 2)) * (step / 2);
+
+    var muted = cvar("--ink-mute"), rule = cvar("--rule-soft"), paper = cvar("--paper");
+
+    // gridlines + y labels
+    [0, 0.5, 1].forEach(function (f) {
+      var y = padT + ih - ih * f;
+      svg.appendChild(svgEl("line", {
+        x1: padL, x2: W - padR, y1: y, y2: y, stroke: rule, "stroke-width": 1
+      }));
+      var t = svgEl("text", {
+        x: padL - 8, y: y + 3.5, fill: muted, "text-anchor": "end",
+        "font-family": "var(--mono)", "font-size": 10
+      });
+      t.textContent = f === 0 ? "0" : fmt(top * f);
+      svg.appendChild(t);
+    });
+
+    var n = rows.length;
+    var bw = iw / n;
+    var barW = Math.max(1, Math.min(18, bw - (bw > 4 ? 1.5 : 0.4)));
+    var ids = D.ids;
+
+    rows.forEach(function (r, i) {
+      if (!r.total) return;
+      var x = padL + bw * i + (bw - barW) / 2;
+      var y = padT + ih;
+      ids.forEach(function (id) {
+        var v = r.per[id];
+        if (!v) return;
+        var h = (v / top) * ih;
+        if (h < 0.7) h = 0.7;
+        y -= h;
+        svg.appendChild(svgEl("rect", {
+          x: x.toFixed(2), y: y.toFixed(2), width: barW.toFixed(2), height: h.toFixed(2),
+          fill: colorOf(id), rx: Math.min(2, barW / 2)
+        }));
+        if (ids.length > 1 && barW >= 3) {
+          svg.appendChild(svgEl("rect", {
+            x: x.toFixed(2), y: (y - 1).toFixed(2), width: barW.toFixed(2), height: 2,
+            fill: paper
+          }));
+        }
+      });
+    });
+
+    // x labels
+    var ticks = Math.min(7, n);
+    var seen = {};
+    for (var t2 = 0; t2 < ticks; t2++) {
+      var idx = Math.round((n - 1) * (ticks === 1 ? 0 : t2 / (ticks - 1)));
+      if (seen[idx]) continue;
+      seen[idx] = 1;
+      var lab = rows[idx].day.slice(5).replace("-", ".");
+      var tx = padL + bw * idx + bw / 2;
+      tx = Math.max(padL + 12, Math.min(W - padR - 12, tx));
+      var te = svgEl("text", {
+        x: tx, y: H - 8, fill: muted, "text-anchor": "middle",
+        "font-family": "var(--mono)", "font-size": 10
+      });
+      te.textContent = lab;
+      svg.appendChild(te);
+    }
+
+    // crosshair
+    var cross = svgEl("line", {
+      x1: 0, x2: 0, y1: padT, y2: padT + ih,
+      stroke: cvar("--ink-mute"), "stroke-width": 1, "stroke-dasharray": "2 3", opacity: 0
+    });
+    svg.appendChild(cross);
+    dailyGeom = { W: W, H: H, padL: padL, padT: padT, ih: ih, bw: bw, rows: rows, ids: ids, cross: cross, svg: svg };
+
+    // legend
+    var lg = document.getElementById("dailyLegend");
+    lg.textContent = "";
+    if (ids.length > 1) {
+      ids.forEach(function (id) {
+        var i2 = el("i");
+        var b2 = el("b"); b2.style.background = colorOf(id);
+        i2.appendChild(b2);
+        i2.appendChild(document.createTextNode(state.machines[id].machine.label));
+        lg.appendChild(i2);
+      });
+    }
+  }
+
+  function bindDailyHover() {
+    var box = document.getElementById("dailyBox");
+    var tip = document.getElementById("dailyTip");
+    function hide() {
+      tip.hidden = true;
+      if (dailyGeom) dailyGeom.cross.setAttribute("opacity", 0);
+    }
+    box.addEventListener("mouseleave", hide);
+    box.addEventListener("mousemove", function (ev) {
+      if (!dailyGeom || !dailyGeom.rows.length) return;
+      var g = dailyGeom;
+      var rect = g.svg.getBoundingClientRect();
+      var scale = rect.width / g.W;
+      var px = (ev.clientX - rect.left) / scale;
+      var i = Math.floor((px - g.padL) / g.bw);
+      if (i < 0 || i >= g.rows.length) { hide(); return; }
+      var r = g.rows[i];
+      var cx = g.padL + g.bw * i + g.bw / 2;
+      g.cross.setAttribute("x1", cx); g.cross.setAttribute("x2", cx);
+      g.cross.setAttribute("opacity", r.total ? 0.5 : 0.25);
+
+      tip.textContent = "";
+      tip.appendChild(el("div", "t-day", r.day + " (" + WD[weekdayOf(r.day)] + ")"));
+      tip.appendChild(el("div", "t-tot", fmt(r.total) + " tokens"));
+      if (r.total) {
+        var tb = el("table");
+        g.ids.forEach(function (id) {
+          var v = r.per[id]; if (!v) return;
+          var tr = el("tr");
+          var td1 = el("td");
+          var sw = el("span", "sw"); sw.style.background = colorOf(id);
+          td1.appendChild(sw);
+          td1.appendChild(document.createTextNode(state.machines[id].machine.label));
+          var td2 = el("td", null, fmt(v));
+          tr.appendChild(td1); tr.appendChild(td2);
+          tb.appendChild(tr);
+        });
+        var tr2 = el("tr");
+        var c1 = el("td"); c1.style.color = "var(--ink-mute)";
+        c1.textContent = "메시지 / 세션";
+        var c2 = el("td", null, r.msgs + " / " + r.sessions);
+        c2.style.color = "var(--ink-mute)";
+        tr2.appendChild(c1); tr2.appendChild(c2);
+        tb.appendChild(tr2);
+        tip.appendChild(tb);
+      } else {
+        tip.appendChild(el("div", "t-day", "사용 없음"));
+      }
+      tip.hidden = false;
+      var bw2 = box.clientWidth, tw = tip.offsetWidth;
+      var left = cx * scale + 14;
+      if (left + tw > bw2) left = cx * scale - tw - 14;
+      tip.style.left = Math.max(0, left) + "px";
+      tip.style.top = "8px";
+    });
+  }
+
+  // ---- composition
+  function renderComp(D) {
+    var bar = document.getElementById("comp");
+    var tbl = document.getElementById("compTable");
+    bar.textContent = ""; tbl.textContent = "";
+    var total = D.total || 1;
+
+    COMP.forEach(function (c) {
+      var v = D.comp[c.k] || 0;
+      var d = el("div");
+      d.style.flexGrow = String(Math.max(v / total, 0.002));
+      d.style.background = cvar(c.v);
+      d.title = c.name + " " + fmt(v);
+      bar.appendChild(d);
+    });
+
+    var head = el("tr");
+    ["구분", "토큰", "비중"].forEach(function (h, i) {
+      var th = el("th", i ? "r" : null, h);
+      head.appendChild(th);
+    });
+    tbl.appendChild(head);
+    COMP.forEach(function (c) {
+      var v = D.comp[c.k] || 0;
+      var tr = el("tr");
+      var td = el("td");
+      var w = el("div", "mname");
+      var dot = el("span", "dot"); dot.style.background = cvar(c.v);
+      w.appendChild(dot);
+      w.appendChild(document.createTextNode(c.name));
+      td.appendChild(w);
+      tr.appendChild(td);
+      tr.appendChild(el("td", "r", fmt(v)));
+      tr.appendChild(el("td", "r", pct(v, total).toFixed(1) + "%"));
+      tbl.appendChild(tr);
+    });
+
+    var cacheShare = pct((D.comp.cr || 0) + (D.comp.cw || 0), total);
+    document.getElementById("compNote").textContent =
+      "프롬프트 캐시가 전체의 " + cacheShare.toFixed(1) +
+      "%. 캐시 읽기는 새로 생성되는 토큰이 아니라 이전 컨텍스트를 다시 읽어들인 양이라, " +
+      "총량이 커 보여도 비용·한도 부담은 입·출력 토큰과 다릅니다.";
+  }
+
+  // ---- models
+  function renderModels(D) {
+    var tbl = document.getElementById("modelTable");
+    tbl.textContent = "";
+    var arr = Object.keys(D.models).map(function (k) { return [k, D.models[k]]; })
+      .sort(function (a, b) { return b[1] - a[1]; });
+    document.getElementById("modelNote").textContent = arr.length + "종";
+    var head = el("tr");
+    ["모델", "", "토큰", "비중"].forEach(function (h, i) {
+      head.appendChild(el("th", i >= 2 ? "r" : null, h));
+    });
+    tbl.appendChild(head);
+    if (!arr.length) {
+      var tr0 = el("tr");
+      var td0 = el("td", "mut", "데이터 없음");
+      td0.colSpan = 4; tr0.appendChild(td0); tbl.appendChild(tr0);
+      return;
+    }
+    var max = arr[0][1] || 1;
+    arr.slice(0, 8).forEach(function (p) {
+      var tr = el("tr");
+      tr.appendChild(el("td", null, shortModel(p[0])));
+      var tdb = el("td");
+      tdb.style.width = "40%";
+      var mini = el("div", "mini");
+      var fill = el("i");
+      fill.style.width = Math.max(2, pct(p[1], max)) + "%";
+      mini.appendChild(fill);
+      tdb.appendChild(mini);
+      tr.appendChild(tdb);
+      tr.appendChild(el("td", "r", fmt(p[1])));
+      tr.appendChild(el("td", "r", pct(p[1], D.total || 1).toFixed(1) + "%"));
+      tbl.appendChild(tr);
+    });
+  }
+
+  // ---- machines
+  function sparkline(id, from) {
+    var M = state.machines[id];
+    var daily = M.daily || {};
+    var days = Object.keys(daily).sort();
+    if (from) days = days.filter(function (d) { return d >= from; });
+    days = days.slice(-60);
+    var svg = svgEl("svg", { class: "spark", viewBox: "0 0 108 24", "aria-hidden": "true" });
+    if (!days.length) return svg;
+    var vals = days.map(function (d) {
+      var b = daily[d];
+      return (b.i || 0) + (b.o || 0) + (b.cw || 0) + (b.cr || 0);
+    });
+    var max = Math.max.apply(null, vals) || 1;
+    var w = 108 / days.length;
+    var col = colorOf(id);
+    vals.forEach(function (v, i) {
+      var h = Math.max(1, (v / max) * 20);
+      svg.appendChild(svgEl("rect", {
+        x: (i * w).toFixed(2), y: (23 - h).toFixed(2),
+        width: Math.max(0.8, w - 0.6).toFixed(2), height: h.toFixed(2),
+        fill: col, opacity: 0.55 + 0.45 * (v / max)
+      }));
+    });
+    return svg;
+  }
+
+  function renderMachines(D) {
+    var tbl = document.getElementById("machineTable");
+    tbl.textContent = "";
+    var ids = allMachines();
+    document.getElementById("machineNote").textContent = ids.length + "대 연결됨";
+    var head = el("tr");
+    ["머신", "최근 추이", "토큰", "비중", "세션", "활성일", "마지막 수집"].forEach(function (h, i) {
+      head.appendChild(el("th", i >= 2 && i <= 5 ? "r" : null, h));
+    });
+    tbl.appendChild(head);
+
+    var from = null;
+    if (state.range !== "all" && D.last) from = dayAdd(D.last, -(parseInt(state.range, 10) - 1));
+
+    ids.forEach(function (id) {
+      var M = state.machines[id];
+      var t = 0, ses = 0, act = 0;
+      Object.keys(M.daily || {}).forEach(function (d) {
+        if (from && d < from) return;
+        var b = M.daily[d];
+        t += (b.i || 0) + (b.o || 0) + (b.cw || 0) + (b.cr || 0);
+        ses += b.s || 0; act++;
+      });
+      var tr = el("tr");
+      if (state.off[id]) tr.style.opacity = ".42";
+
+      var td1 = el("td");
+      var nm = el("div", "mname");
+      var dot = el("span", "dot"); dot.style.background = colorOf(id);
+      nm.appendChild(dot);
+      var box = el("div");
+      box.appendChild(document.createTextNode(M.machine.label));
+      box.appendChild(el("small", null, M.machine.os || M.machine.hostname || ""));
+      nm.appendChild(box);
+      td1.appendChild(nm);
+      tr.appendChild(td1);
+
+      var td2 = el("td");
+      td2.appendChild(sparkline(id, from));
+      tr.appendChild(td2);
+
+      tr.appendChild(el("td", "r", fmt(t)));
+      tr.appendChild(el("td", "r", pct(t, D.total || 1).toFixed(1) + "%"));
+      tr.appendChild(el("td", "r", comma(ses)));
+      tr.appendChild(el("td", "r", String(act)));
+
+      var rel = relDays((M.generated_at || "").slice(0, 10));
+      var when = rel == null ? "—" : rel === 0 ? "오늘" : rel === 1 ? "어제" : rel + "일 전";
+      var td7 = el("td", "mut" + (rel != null && rel >= 2 ? " stale" : ""), when);
+      tr.appendChild(td7);
+      tbl.appendChild(tr);
+    });
+  }
+
+  // ---- projects
+  function renderProjects(D) {
+    var tbl = document.getElementById("projectTable");
+    tbl.textContent = "";
+    var arr = Object.keys(D.projects).map(function (k) { return [k, D.projects[k]]; })
+      .sort(function (a, b) { return b[1].t - a[1].t; }).slice(0, 8);
+    var head = el("tr");
+    ["프로젝트", "", "토큰", "최근"].forEach(function (h, i) {
+      head.appendChild(el("th", i === 2 ? "r" : null, h));
+    });
+    tbl.appendChild(head);
+    if (!arr.length) {
+      var tr0 = el("tr"); var td0 = el("td", "mut", "데이터 없음");
+      td0.colSpan = 4; tr0.appendChild(td0); tbl.appendChild(tr0); return;
+    }
+    var max = arr[0][1].t || 1;
+    arr.forEach(function (p) {
+      var tr = el("tr");
+      tr.appendChild(el("td", null, p[0]));
+      var tdb = el("td"); tdb.style.width = "34%";
+      var mini = el("div", "mini");
+      var fill = el("i");
+      fill.style.width = Math.max(2, pct(p[1].t, max)) + "%";
+      mini.appendChild(fill); tdb.appendChild(mini);
+      tr.appendChild(tdb);
+      tr.appendChild(el("td", "r", fmt(p[1].t)));
+      tr.appendChild(el("td", "mut", p[1].last || "—"));
+      tbl.appendChild(tr);
+    });
+  }
+
+  // ---- heatmap
+  function renderHeat(D) {
+    var grid = document.getElementById("heat");
+    var xs = document.getElementById("heatX");
+    grid.textContent = ""; xs.textContent = "";
+    var max = 0;
+    D.wh.forEach(function (row) { row.forEach(function (v) { if (v > max) max = v; }); });
+    var steps = ["--heat-0","--heat-1","--heat-2","--heat-3","--heat-4","--heat-5","--heat-6"];
+    for (var w = 0; w < 7; w++) {
+      grid.appendChild(el("div", "hl", WD[w]));
+      for (var h = 0; h < 24; h++) {
+        var v = D.wh[w][h];
+        var lvl = !max || !v ? 0 : Math.max(1, Math.min(6, Math.ceil(v / max * 6)));
+        var c = el("div", "cell");
+        c.style.background = cvar(steps[lvl]);
+        c.title = WD[w] + "요일 " + h + "시 · 메시지 " + Math.round(v);
+        grid.appendChild(c);
+      }
+    }
+    xs.appendChild(el("span"));
+    for (var h2 = 0; h2 < 24; h2++) xs.appendChild(el("span", null, h2 % 3 === 0 ? String(h2) : ""));
+    var peak = 0, ph = 0;
+    D.hours.forEach(function (v, i) { if (v > peak) { peak = v; ph = i; } });
+    document.getElementById("heatNote").textContent = peak ? "피크 " + ph + "시" : "";
+  }
+
+  // ------------------------------------------------------------ ingest
+  function ingest(payload, quiet) {
+    if (!payload || payload.schema !== 1 || !payload.machine || !payload.machine.id) {
+      if (!quiet) alert("수집기 형식(schema 1)의 JSON이 아닙니다.");
+      return false;
+    }
+    if (state.sample) { state.machines = {}; state.off = {}; state.sample = false; }
+    var id = payload.machine.id;
+    var prev = state.machines[id];
+    if (prev && !prev.sample && (prev.generated_at || "") > (payload.generated_at || "")) return true;
+    state.machines[id] = payload;
+    if (!quiet) state.dirty[id] = true;
+    return true;
+  }
+
+  function readFiles(files) {
+    var list = Array.prototype.slice.call(files);
+    var ok = 0, done = 0;
+    if (!list.length) return;
+    list.forEach(function (f) {
+      var fr = new FileReader();
+      fr.onload = function () {
+        try {
+          var d = JSON.parse(fr.result);
+          if (d && d.kind === "merged" && Array.isArray(d.machines)) {
+            d.machines.forEach(function (m) { if (ingest(m)) ok++; });
+          } else if (ingest(d)) ok++;
+        } catch (e) {
+          console.warn("parse fail", f.name, e);
+        }
+        if (++done === list.length) {
+          render();
+          document.getElementById("btnSync").hidden = !(state.db && Object.keys(state.dirty).length);
+        }
+      };
+      fr.readAsText(f);
+    });
+  }
+
+  // ------------------------------------------------------------ wiring
+  document.querySelectorAll(".seg button").forEach(function (b) {
+    b.onclick = function () {
+      document.querySelectorAll(".seg button").forEach(function (o) {
+        o.setAttribute("aria-pressed", o === b ? "true" : "false");
+      });
+      state.range = b.dataset.range;
+      render();
+    };
+  });
+
+  var fi = document.getElementById("fileInput");
+  fi.onchange = function () { readFiles(fi.files); fi.value = ""; };
+  document.getElementById("btnAdd").onclick = function () { fi.click(); };
+  var drop = document.getElementById("drop");
+  drop.onclick = function () { fi.click(); };
+  drop.onkeydown = function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fi.click(); } };
+  ["dragenter", "dragover"].forEach(function (t) {
+    drop.addEventListener(t, function (e) { e.preventDefault(); drop.classList.add("over"); });
+  });
+  ["dragleave", "drop"].forEach(function (t) {
+    drop.addEventListener(t, function (e) { e.preventDefault(); drop.classList.remove("over"); });
+  });
+  drop.addEventListener("drop", function (e) {
+    if (e.dataTransfer && e.dataTransfer.files) readFiles(e.dataTransfer.files);
+  });
+  window.addEventListener("dragover", function (e) { e.preventDefault(); });
+  window.addEventListener("drop", function (e) { e.preventDefault(); });
+
+  document.getElementById("btnExport").onclick = function () {
+    var out = { schema: 1, kind: "merged", generated_at: new Date().toISOString(),
+                machines: Object.keys(state.machines).map(function (k) { return state.machines[k]; }) };
+    var txt = JSON.stringify(out);
+    (async function () {
+      var dl = window.claude && await window.claude.use("downloads");
+      if (dl) {
+        try { await dl.save({ filename: "claude-usage-merged.json", data: txt }); return; }
+        catch (e) { console.warn(e); }
+      }
+      var url = URL.createObjectURL(new Blob([txt], { type: "application/json" }));
+      var a = document.createElement("a");
+      a.href = url; a.download = "claude-usage-merged.json"; a.click();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+    })();
+  };
+
+  var _lastW = 0;
+  var ro = window.ResizeObserver ? new ResizeObserver(function () {
+    var w = document.getElementById("dailyBox").clientWidth;
+    if (Math.abs(w - _lastW) < 2) return;   // 자기 렌더가 자기를 다시 부르는 것 방지
+    _lastW = w;
+    renderDaily(derive());
+  }) : null;
+  if (ro) ro.observe(document.getElementById("dailyBox"));
+
+  // 테마가 바뀌면 캐시된 색을 버리고 다시 그린다
+  if (window.matchMedia) {
+    var mq = window.matchMedia("(prefers-color-scheme: dark)");
+    var onTheme = function () { render(); };
+    if (mq.addEventListener) mq.addEventListener("change", onTheme);
+    else if (mq.addListener) mq.addListener(onTheme);
+  }
+
+  bindDailyHover();
+
+  // initial: 로컬 서버가 심어준 데이터가 있으면 그것, 없으면 예시
+  var boot = window.__BOOTSTRAP__;
+  var scanInfo = window.__SCAN__ || {};
+  if (boot && boot.length) {
+    boot.forEach(function (p) { ingest(p, true); });
+  } else if (window.__LOCAL__ && scanInfo.scanning) {
+    // 첫 스캔 중 — 예시 데이터를 보여주면 진짜 수치로 오해하게 된다
+    state.sample = false;
+    state.scanning = true;
+    state.scanElapsed = scanInfo.elapsed || 0;
+  } else {
+    makeSample().forEach(function (p) { state.machines[p.machine.id] = p; });
+  }
+  render();
+
+  // 로컬 서버 모드: 주기적으로 다시 읽어 화면을 최신으로 유지
+  if (window.__LOCAL__) {
+    document.getElementById("loadSection").hidden = true;
+    var timer = null;
+    var poll = function () {
+      fetch("api/data", { cache: "no-store" })
+        .then(function (r) { return r.json(); })
+        .then(function (res) {
+          // 배열(구버전)과 객체(현재) 둘 다 받는다
+          var list = Array.isArray(res) ? res : (res.machines || []);
+          var wasScanning = state.scanning;
+          state.scanning = Array.isArray(res) ? false : !!res.scanning;
+          state.scanElapsed = Array.isArray(res) ? 0 : (res.elapsed || 0);
+          var changed = wasScanning !== state.scanning;
+          list.forEach(function (p) {
+            var prev = state.machines[p.machine && p.machine.id];
+            if (!prev || prev.generated_at !== p.generated_at) {
+              if (ingest(p, true)) changed = true;
+            }
+          });
+          if (changed) render();
+          schedule();
+        })
+        .catch(function () { schedule(); });  // 서버가 내려가도 화면은 그대로 둔다
+    };
+    var schedule = function () {
+      if (timer) clearTimeout(timer);
+      // 스캔 중에는 자주, 평소에는 느긋하게
+      timer = setTimeout(poll, state.scanning ? 2000 : 60000);
+    };
+    schedule();
+    window.addEventListener("focus", poll);
+    // 스캔 중 경과 시간 표시
+    setInterval(function () {
+      if (state.scanning) {
+        state.scanElapsed = (state.scanElapsed || 0) + 1;
+        renderBanner();
+      }
+    }, 1000);
+  }
+
+  // ------------------------------------------------------------ db sync
+  (async function () {
+    if (!window.claude || !window.claude.use) return;
+    var db;
+    try { db = await window.claude.use("db"); } catch (e) { db = null; }
+    if (!db) return;
+    state.db = db;
+
+    var sync = document.getElementById("btnSync");
+    sync.hidden = !Object.keys(state.dirty).length;
+    sync.onclick = async function () {
+      sync.disabled = true;
+      var ids = Object.keys(state.dirty);
+      var okc = 0;
+      for (var i = 0; i < ids.length; i++) {
+        try { await db.doc("machines/" + ids[i]).set(state.machines[ids[i]]); okc++; delete state.dirty[ids[i]]; }
+        catch (e) { console.warn("sync fail", ids[i], e); }
+      }
+      sync.disabled = false;
+      sync.textContent = okc ? "저장됨 · " + okc + "대" : "저장 실패";
+      setTimeout(function () {
+        sync.textContent = "이 대시보드에 저장";
+        sync.hidden = !Object.keys(state.dirty).length;
+      }, 2200);
+    };
+
+    db.collection("machines").onSnapshot(function (snap) {
+      var got = 0;
+      snap.docs.forEach(function (d) {
+        var v = d.data();
+        if (v && ingest(v, true)) got++;
+      });
+      if (got) {
+        document.getElementById("loadSection").querySelector(".hint").textContent =
+          "이 대시보드에 저장된 머신 " + got + "대를 불러왔습니다. 다른 PC에서 이 링크를 열면 같은 화면이 보입니다.";
+        render();
+      }
+    }, function (err) { console.warn("db snapshot", err); });
+  })();
+})();
+</script>
