@@ -429,6 +429,9 @@ def print_summary(p):
         f"캐시쓰기 {human(t['cw'])} / 캐시읽기 {human(t['cr'])}"
     )
     print(f"  메시지        {t['m']:,}")
+    # em dash 는 cp949 콘솔에서 죽는다. int 로 감싸는 것도 필수 — human() 은
+    # 1000 미만이면 str(n) 을 그대로 돌려주므로 float 이 그대로 새어 나온다.
+    print(f"  턴당 컨텍스트 {human(int(t['cr'] / t['m'])) if t['m'] else '-'}")
     print(f"  세션          {t['sessions']:,}")
     print(f"  활성 일수     {t['active_days']}  (현재 연속 {p['streak']['current']}일 / 최장 {p['streak']['max']}일)")
     if p.get("peak_hour") is not None:

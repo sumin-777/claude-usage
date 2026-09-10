@@ -295,6 +295,18 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
     <div class="legend" id="dailyLegend"></div>
   </section>
 
+  <section>
+    <div class="sec-head">
+      <h2>턴당 컨텍스트</h2>
+      <div class="note" id="ctxNote">캐시 읽기 ÷ 메시지 · 실효 컨텍스트 크기</div>
+    </div>
+    <div class="chartbox" id="ctxBox">
+      <svg id="ctxSvg" role="img" aria-label="일별 턴당 컨텍스트 추이 라인 차트"></svg>
+      <div class="tip" id="ctxTip" hidden></div>
+    </div>
+    <p class="hint">우상향 추세는 세션 컨텍스트가 점점 길어지고 있다는 신호입니다.</p>
+  </section>
+
   <section class="grid2">
     <div>
       <div class="sec-head">
@@ -572,15 +584,15 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
     }
 
     var rows = axis.map(function (day) {
-      var per = {}, tot = 0, msgs = 0, ses = 0;
+      var per = {}, tot = 0, msgs = 0, ses = 0, cr = 0;
       ids.forEach(function (id) {
         var b = (state.machines[id].daily || {})[day];
         if (!b) return;
         var t = (b.i || 0) + (b.o || 0) + (b.cw || 0) + (b.cr || 0);
         if (t) per[id] = t;
-        tot += t; msgs += b.m || 0; ses += b.s || 0;
+        tot += t; msgs += b.m || 0; ses += b.s || 0; cr += b.cr || 0;
       });
-      return { day: day, per: per, total: tot, msgs: msgs, sessions: ses };
+      return { day: day, per: per, total: tot, msgs: msgs, sessions: ses, cr: cr };
     });
 
     var comp = { i: 0, o: 0, cw: 0, cr: 0 }, msgs = 0, sessions = 0;
@@ -652,6 +664,7 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
     renderChips();
     renderStats(D);
     renderDaily(D);
+    renderContext(D);
     renderComp(D);
     renderModels(D);
     renderMachines(D);
@@ -750,7 +763,8 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
       ["세션", comma(D.sessions), ""],
       ["메시지", comma(D.msgs), ""],
       ["머신", String(D.ids.length) + " / " + allMachines().length, "활성 / 전체"],
-      ["일 평균", fmt(D.active.length ? D.total / D.active.length : 0), "tokens"]
+      ["일 평균", fmt(D.active.length ? D.total / D.active.length : 0), "tokens"],
+      ["턴당 컨텍스트", D.msgs ? fmt(D.comp.cr / D.msgs) : "—", "tokens"]
     ];
     items.forEach(function (it) {
       var s = el("div", "stat");
@@ -917,6 +931,135 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
         tr2.appendChild(c1); tr2.appendChild(c2);
         tb.appendChild(tr2);
         tip.appendChild(tb);
+      } else {
+        tip.appendChild(el("div", "t-day", "사용 없음"));
+      }
+      tip.hidden = false;
+      var bw2 = box.clientWidth, tw = tip.offsetWidth;
+      var left = cx * scale + 14;
+      if (left + tw > bw2) left = cx * scale - tw - 14;
+      tip.style.left = Math.max(0, left) + "px";
+      tip.style.top = "8px";
+    });
+  }
+
+  // ---- context per turn line
+  var contextGeom = null;
+  function renderContext(D) {
+    var box = document.getElementById("ctxBox");
+    var svg = document.getElementById("ctxSvg");
+    var W = Math.max(320, box.clientWidth || 900);
+    _lastCtxW = box.clientWidth || W;
+    var H = 240;
+    var padL = 46, padR = 10, padT = 12, padB = 26;
+    var iw = W - padL - padR, ih = H - padT - padB;
+    svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+    svg.setAttribute("height", H);
+    svg.textContent = "";
+
+    var rows = D.rows;
+    if (!rows.length) { contextGeom = null; return; }
+
+    var values = rows.map(function (r) { return r.msgs > 0 ? r.cr / r.msgs : null; });
+    var max = 0;
+    values.forEach(function (v) { if (v != null && v > max) max = v; });
+    if (max <= 0) max = 1;
+    var step = Math.pow(10, Math.floor(Math.log10(max)));
+    var top = Math.ceil(max / step) * step;
+    if (top / max > 1.6) top = Math.ceil(max / (step / 2)) * (step / 2);
+
+    var muted = cvar("--ink-mute"), rule = cvar("--rule-soft"), accent = cvar("--accent");
+
+    [0, 0.5, 1].forEach(function (f) {
+      var y = padT + ih - ih * f;
+      svg.appendChild(svgEl("line", {
+        x1: padL, x2: W - padR, y1: y, y2: y, stroke: rule, "stroke-width": 1
+      }));
+      var t = svgEl("text", {
+        x: padL - 8, y: y + 3.5, fill: muted, "text-anchor": "end",
+        "font-family": "var(--mono)", "font-size": 10
+      });
+      t.textContent = f === 0 ? "0" : fmt(top * f);
+      svg.appendChild(t);
+    });
+
+    var n = rows.length;
+    var bw = iw / n;
+    var path = "";
+    values.forEach(function (v, i) {
+      if (v == null) return;
+      var x = padL + bw * i + bw / 2;
+      var y = padT + ih - (v / top) * ih;
+      path += (i === 0 || values[i - 1] == null ? "M" : "L") + x.toFixed(2) + " " + y.toFixed(2) + " ";
+    });
+    if (path) {
+      svg.appendChild(svgEl("path", {
+        d: path.trim(), fill: "none", stroke: accent, "stroke-width": 2,
+        "stroke-linecap": "round", "stroke-linejoin": "round"
+      }));
+      values.forEach(function (v, i) {
+        if (v == null) return;
+        var x = padL + bw * i + bw / 2;
+        var y = padT + ih - (v / top) * ih;
+        svg.appendChild(svgEl("circle", {
+          cx: x.toFixed(2), cy: y.toFixed(2), r: 2.5, fill: accent
+        }));
+      });
+    }
+
+    var ticks = Math.min(7, n);
+    var seen = {};
+    for (var t2 = 0; t2 < ticks; t2++) {
+      var idx = Math.round((n - 1) * (ticks === 1 ? 0 : t2 / (ticks - 1)));
+      if (seen[idx]) continue;
+      seen[idx] = 1;
+      var lab = rows[idx].day.slice(5).replace("-", ".");
+      var tx = padL + bw * idx + bw / 2;
+      tx = Math.max(padL + 12, Math.min(W - padR - 12, tx));
+      var te = svgEl("text", {
+        x: tx, y: H - 8, fill: muted, "text-anchor": "middle",
+        "font-family": "var(--mono)", "font-size": 10
+      });
+      te.textContent = lab;
+      svg.appendChild(te);
+    }
+
+    var cross = svgEl("line", {
+      x1: 0, x2: 0, y1: padT, y2: padT + ih,
+      stroke: muted, "stroke-width": 1, "stroke-dasharray": "2 3", opacity: 0
+    });
+    svg.appendChild(cross);
+    contextGeom = {
+      W: W, H: H, padL: padL, padT: padT, ih: ih, bw: bw,
+      rows: rows, values: values, cross: cross, svg: svg
+    };
+  }
+
+  function bindContextHover() {
+    var box = document.getElementById("ctxBox");
+    var tip = document.getElementById("ctxTip");
+    function hide() {
+      tip.hidden = true;
+      if (contextGeom) contextGeom.cross.setAttribute("opacity", 0);
+    }
+    box.addEventListener("mouseleave", hide);
+    box.addEventListener("mousemove", function (ev) {
+      if (!contextGeom || !contextGeom.rows.length) return;
+      var g = contextGeom;
+      var rect = g.svg.getBoundingClientRect();
+      var scale = rect.width / g.W;
+      var px = (ev.clientX - rect.left) / scale;
+      var i = Math.floor((px - g.padL) / g.bw);
+      if (i < 0 || i >= g.rows.length) { hide(); return; }
+      var r = g.rows[i], v = g.values[i];
+      var cx = g.padL + g.bw * i + g.bw / 2;
+      g.cross.setAttribute("x1", cx); g.cross.setAttribute("x2", cx);
+      g.cross.setAttribute("opacity", v != null ? 0.5 : 0.25);
+
+      tip.textContent = "";
+      tip.appendChild(el("div", "t-day", r.day + " (" + WD[weekdayOf(r.day)] + ")"));
+      if (v != null) {
+        tip.appendChild(el("div", "t-tot", fmt(v) + " tokens"));
       } else {
         tip.appendChild(el("div", "t-day", "사용 없음"));
       }
@@ -1241,6 +1384,15 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
   }) : null;
   if (ro) ro.observe(document.getElementById("dailyBox"));
 
+  var _lastCtxW = 0;
+  var ctxRo = window.ResizeObserver ? new ResizeObserver(function () {
+    var w = document.getElementById("ctxBox").clientWidth;
+    if (Math.abs(w - _lastCtxW) < 2) return;
+    _lastCtxW = w;
+    renderContext(derive());
+  }) : null;
+  if (ctxRo) ctxRo.observe(document.getElementById("ctxBox"));
+
   // 테마가 바뀌면 캐시된 색을 버리고 다시 그린다
   if (window.matchMedia) {
     var mq = window.matchMedia("(prefers-color-scheme: dark)");
@@ -1250,6 +1402,7 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
   }
 
   bindDailyHover();
+  bindContextHover();
 
   // initial: 로컬 서버가 심어준 데이터가 있으면 그것, 없으면 예시
   var boot = window.__BOOTSTRAP__;
