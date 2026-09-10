@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-claude-usage — Claude Code 토큰 사용량 대시보드 (단일 파일)
+claude-usage ― Claude Code 토큰 사용량 대시보드 (단일 파일)
 
 이 파일 하나만 있으면 된다. 설치할 것도, 서버도, 계정도 필요 없다.
 
@@ -166,7 +166,7 @@ def _read_rows(path, start_off, models, sessions):
             if not raw:
                 break
             if not raw.endswith(b"\n"):
-                break            # 아직 쓰는 중인 마지막 줄 — 다음에 다시 읽는다
+                break            # 아직 쓰는 중인 마지막 줄 ― 다음에 다시 읽는다
             off += len(raw)
             line = raw.strip()
             if not line or line[:1] != b"{":
@@ -815,7 +815,7 @@ def do_status(args):
     print(f"\n  실행 중 (pid {live.get('pid')}, {live.get('started_at', '?')} 시작)")
     print(f"  대시보드  {_view_url(live)}")
     if live.get("host") == "0.0.0.0":
-        print(f"  외부 수신  열림 — 이 PC 주소 {lan_ip()}")
+        print(f"  외부 수신  열림 ― 이 PC 주소 {lan_ip()}")
     n = len(load_remote())
     if n:
         print(f"  보관 중인 원격 머신 {n}대")
@@ -1068,7 +1068,7 @@ def main():
         prog="claude-usage",
         description="Claude Code 토큰 사용량 대시보드 (단일 파일)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
+        epilog=console_safe(__doc__),
     )
     ap.add_argument("--port", type=int, default=8787, help="대시보드 포트 (기본 8787)")
     ap.add_argument("--host", default="127.0.0.1",

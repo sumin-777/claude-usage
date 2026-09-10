@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-claude-usage-merge — 여러 머신의 수집 결과를 하나로 합친다.
+claude-usage-merge ― 여러 머신의 수집 결과를 하나로 합친다.
 
 각 PC/서버에서 claude-usage-collect.py 로 만든 JSON들을 한 폴더(동기화 폴더,
 git repo 등)에 모아두고 이 스크립트를 돌리면 대시보드가 읽는 merged.json 이 나온다.

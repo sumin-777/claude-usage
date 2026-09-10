@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-claude-usage-collect — Claude Code 로컬 사용량 수집기
+claude-usage-collect ― Claude Code 로컬 사용량 수집기
 
 ~/.claude/projects/**/*.jsonl (Claude Code 세션 트랜스크립트)를 파싱해
 일자·모델·프로젝트·시간대별 토큰 사용량으로 집계하고, 머신 라벨을 붙인
@@ -411,6 +411,25 @@ def build_payload(args):
     return payload
 
 
+def console_safe(text):
+    """콘솔 인코딩으로 못 쓰는 문자를 대체 문자로 낮춘다.
+
+    cp949(한국어)·cp932(일본어) 콘솔에는 em dash(U+2014) 슬롯이 없다.
+    한글 수백 자는 멀쩡히 나가는데 그 한 글자에서 argparse 가 --help 를
+    찍다 죽는다. 도움말은 사람이 읽는 글이니 크래시보다 대체가 낫다.
+
+    stdout 으로 나가는 JSON 에는 절대 쓰지 마라. 조용히 데이터가 바뀐다.
+    """
+    enc = getattr(sys.stdout, "encoding", None)
+    if not enc:
+        return text
+    try:
+        text.encode(enc)
+        return text
+    except (UnicodeEncodeError, LookupError):
+        return text.encode(enc, "replace").decode(enc, "replace")
+
+
 def human(n):
     for unit, div in (("B", 1e9), ("M", 1e6), ("K", 1e3)):
         if n >= div:
@@ -429,7 +448,7 @@ def print_summary(p):
         f"캐시쓰기 {human(t['cw'])} / 캐시읽기 {human(t['cr'])}"
     )
     print(f"  메시지        {t['m']:,}")
-    # em dash 는 cp949 콘솔에서 죽는다. int 로 감싸는 것도 필수 — human() 은
+    # em dash 는 cp949 콘솔에서 죽는다. int 로 감싸는 것도 필수 ― human() 은
     # 1000 미만이면 str(n) 을 그대로 돌려주므로 float 이 그대로 새어 나온다.
     print(f"  턴당 컨텍스트 {human(int(t['cr'] / t['m'])) if t['m'] else '-'}")
     print(f"  세션          {t['sessions']:,}")
@@ -447,7 +466,7 @@ def main():
     ap = argparse.ArgumentParser(
         description="Claude Code 로컬 트랜스크립트에서 토큰 사용량을 집계합니다.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
+        epilog=console_safe(__doc__),
     )
     ap.add_argument("-o", "--output", help="출력 JSON 경로 (기본: ~/claude-usage/<machine>.json)")
     ap.add_argument("--machine", help="머신 라벨 (기본: hostname)")

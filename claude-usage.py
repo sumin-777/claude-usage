@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-claude-usage — Claude Code 토큰 사용량 대시보드 (단일 파일)
+claude-usage ― Claude Code 토큰 사용량 대시보드 (단일 파일)
 
 이 파일 하나만 있으면 된다. 설치할 것도, 서버도, 계정도 필요 없다.
 
@@ -424,6 +424,25 @@ def build_payload(args):
     return payload
 
 
+def console_safe(text):
+    """콘솔 인코딩으로 못 쓰는 문자를 대체 문자로 낮춘다.
+
+    cp949(한국어)·cp932(일본어) 콘솔에는 em dash(U+2014) 슬롯이 없다.
+    한글 수백 자는 멀쩡히 나가는데 그 한 글자에서 argparse 가 --help 를
+    찍다 죽는다. 도움말은 사람이 읽는 글이니 크래시보다 대체가 낫다.
+
+    stdout 으로 나가는 JSON 에는 절대 쓰지 마라. 조용히 데이터가 바뀐다.
+    """
+    enc = getattr(sys.stdout, "encoding", None)
+    if not enc:
+        return text
+    try:
+        text.encode(enc)
+        return text
+    except (UnicodeEncodeError, LookupError):
+        return text.encode(enc, "replace").decode(enc, "replace")
+
+
 def human(n):
     for unit, div in (("B", 1e9), ("M", 1e6), ("K", 1e3)):
         if n >= div:
@@ -442,7 +461,7 @@ def print_summary(p):
         f"캐시쓰기 {human(t['cw'])} / 캐시읽기 {human(t['cr'])}"
     )
     print(f"  메시지        {t['m']:,}")
-    # em dash 는 cp949 콘솔에서 죽는다. int 로 감싸는 것도 필수 — human() 은
+    # em dash 는 cp949 콘솔에서 죽는다. int 로 감싸는 것도 필수 ― human() 은
     # 1000 미만이면 str(n) 을 그대로 돌려주므로 float 이 그대로 새어 나온다.
     print(f"  턴당 컨텍스트 {human(int(t['cr'] / t['m'])) if t['m'] else '-'}")
     print(f"  세션          {t['sessions']:,}")
@@ -2090,7 +2109,7 @@ def _read_rows(path, start_off, models, sessions):
             if not raw:
                 break
             if not raw.endswith(b"\n"):
-                break            # 아직 쓰는 중인 마지막 줄 — 다음에 다시 읽는다
+                break            # 아직 쓰는 중인 마지막 줄 ― 다음에 다시 읽는다
             off += len(raw)
             line = raw.strip()
             if not line or line[:1] != b"{":
@@ -2739,7 +2758,7 @@ def do_status(args):
     print(f"\n  실행 중 (pid {live.get('pid')}, {live.get('started_at', '?')} 시작)")
     print(f"  대시보드  {_view_url(live)}")
     if live.get("host") == "0.0.0.0":
-        print(f"  외부 수신  열림 — 이 PC 주소 {lan_ip()}")
+        print(f"  외부 수신  열림 ― 이 PC 주소 {lan_ip()}")
     n = len(load_remote())
     if n:
         print(f"  보관 중인 원격 머신 {n}대")
@@ -2992,7 +3011,7 @@ def main():
         prog="claude-usage",
         description="Claude Code 토큰 사용량 대시보드 (단일 파일)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
+        epilog=console_safe(__doc__),
     )
     ap.add_argument("--port", type=int, default=8787, help="대시보드 포트 (기본 8787)")
     ap.add_argument("--host", default="127.0.0.1",
