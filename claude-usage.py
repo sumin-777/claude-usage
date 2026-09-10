@@ -44,15 +44,21 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Claude Code가 usage를 기록하는 필드들
-USAGE_FIELDS = (
-    ("input_tokens", "i"),
-    ("output_tokens", "o"),
-    ("cache_creation_input_tokens", "cw"),
-    ("cache_read_input_tokens", "cr"),
+LEGACY_USAGE_FIELDS = (
+    (("input_tokens",), "i"),
+    (("output_tokens",), "o"),
+    (("cache_creation_input_tokens",), "cw"),
+    (("cache_read_input_tokens",), "cr"),
 )
+USAGE_FIELDS = LEGACY_USAGE_FIELDS + (
+    (("cache_creation", "ephemeral_1h_input_tokens"), "cw1"),
+    (("cache_creation", "ephemeral_5m_input_tokens"), "cw5"),
+    (("output_tokens_details", "thinking_tokens"), "th"),
+)
+BUCKET_KEYS = ("i", "o", "cw", "cr", "cw1", "cw5", "th", "m")
 
 # 집계에서 제외할 model 값
 SKIP_MODELS = {"<synthetic>", "synthetic", None, ""}
@@ -134,14 +140,56 @@ def machine_identity(label):
 
 
 def new_bucket():
-    return {"i": 0, "o": 0, "cw": 0, "cr": 0, "m": 0}
+    return {k: 0 for k in BUCKET_KEYS}
+
+
+def normalize_payload_usage(payload):
+    for bucket in [payload.get("totals", {})]:
+        if isinstance(bucket, dict):
+            for key in ("cw1", "cw5", "th"):
+                bucket.setdefault(key, 0)
+    for section in ("daily", "models", "projects"):
+        buckets = payload.get(section, {})
+        if not isinstance(buckets, dict):
+            continue
+        for bucket in buckets.values():
+            if isinstance(bucket, dict):
+                for key in ("cw1", "cw5", "th"):
+                    bucket.setdefault(key, 0)
+    return payload
+
+
+def usage_value(usage, path):
+    value = usage
+    for part in path:
+        if not isinstance(value, dict):
+            return 0
+        value = value.get(part)
+    if not isinstance(value, (int, float)) or value <= 0:
+        return 0
+    try:
+        return int(value)
+    except (OverflowError, ValueError):
+        return 0
+
+
+def usage_values(usage):
+    return [usage_value(usage, path) for path, _ in USAGE_FIELDS]
+
+
+def usage_from_values(values):
+    usage = {}
+    for value, (path, _) in zip(values, USAGE_FIELDS):
+        target = usage
+        for part in path[:-1]:
+            target = target.setdefault(part, {})
+        target[path[-1]] = value
+    return usage
 
 
 def add_usage(bucket, u):
-    for src, dst in USAGE_FIELDS:
-        v = u.get(src)
-        if isinstance(v, (int, float)) and v > 0:
-            bucket[dst] += int(v)
+    for path, dst in USAGE_FIELDS:
+        bucket[dst] = bucket.get(dst, 0) + usage_value(u, path)
     bucket["m"] += 1
 
 
@@ -255,9 +303,7 @@ def aggregate(root, since=None, until=None, verbose=False):
         add_usage(models[rec["model"]], u)
         add_usage(projects[rec["project"]], u)
 
-        tot = sum(
-            int(u.get(src, 0) or 0) for src, _ in USAGE_FIELDS
-        )
+        tot = sum(usage_value(u, path) for path, _ in LEGACY_USAGE_FIELDS)
         daily_models[day][rec["model"]] += tot
 
         hours[local_dt.hour] += 1
@@ -317,7 +363,8 @@ def streaks(days_sorted):
 def load_pricing(path):
     """
     비용 추정용 단가표. USD / 1M tokens 기준.
-    형식: {"model-substring": {"input":X,"output":Y,"cache_write":Z,"cache_read":W}, ...}
+    형식: {"model-substring": {"input":X,"output":Y,"cache_write":Z,
+          "cache_write_1h":A,"cache_write_5m":B,"cache_read":W}, ...}
     부분 문자열 매칭(가장 긴 것 우선). 단가는 사용자가 직접 채워야 한다.
     """
     if not path:
@@ -331,6 +378,7 @@ def estimate_cost(models_agg, pricing):
         return None
     keys = sorted(pricing.keys(), key=len, reverse=True)
     per_model = {}
+    pricing_mode = {}
     total = 0.0
     unmatched = []
     for model, b in models_agg.items():
@@ -339,10 +387,22 @@ def estimate_cost(models_agg, pricing):
             unmatched.append(model)
             continue
         p = pricing[hit]
+        split = "cache_write_1h" in p or "cache_write_5m" in p
+        if split:
+            remainder = max(0, b.get("cw", 0) - b.get("cw1", 0) - b.get("cw5", 0))
+            cache_cost = (
+                b.get("cw1", 0) * p.get("cache_write_1h", p.get("cache_write", 0))
+                + b.get("cw5", 0) * p.get("cache_write_5m", p.get("cache_write", 0))
+                + remainder * p.get("cache_write", 0)
+            )
+            pricing_mode[model] = "split"
+        else:
+            cache_cost = b.get("cw", 0) * p.get("cache_write", 0)
+            pricing_mode[model] = "legacy"
         c = (
             b["i"] * p.get("input", 0)
             + b["o"] * p.get("output", 0)
-            + b["cw"] * p.get("cache_write", 0)
+            + cache_cost
             + b["cr"] * p.get("cache_read", 0)
         ) / 1_000_000
         per_model[model] = round(c, 4)
@@ -351,6 +411,7 @@ def estimate_cost(models_agg, pricing):
         "currency": "USD",
         "total": round(total, 2),
         "per_model": per_model,
+        "pricing_mode": pricing_mode,
         "unpriced_models": unmatched,
         "note": "사용자 제공 단가표 기반 추정치. 실제 청구액이 아님.",
     }
@@ -376,7 +437,7 @@ def build_payload(args):
 
     totals = new_bucket()
     for b in daily.values():
-        for k in ("i", "o", "cw", "cr", "m"):
+        for k in BUCKET_KEYS:
             totals[k] += b.get(k, 0)
     totals["total"] = bucket_total(totals)
     totals["sessions"] = agg["sessions"]
@@ -460,6 +521,15 @@ def print_summary(p):
         f"    입력 {human(t['i'])} / 출력 {human(t['o'])} / "
         f"캐시쓰기 {human(t['cw'])} / 캐시읽기 {human(t['cr'])}"
     )
+    if t.get("cw1", 0) or t.get("cw5", 0):
+        remainder = t["cw"] - t.get("cw1", 0) - t.get("cw5", 0)
+        detail = f"    캐시 쓰기 중 1h {human(t.get('cw1', 0))} / 5m {human(t.get('cw5', 0))}"
+        if remainder > 0:
+            detail += f" / 미분류 {human(remainder)}"
+        print(detail)
+    if t.get("th", 0):
+        share = (t["th"] / t["o"] * 100) if t["o"] else 0
+        print(f"    출력 중 thinking {human(t['th'])} ({share:.1f}%)")
     print(f"  메시지        {t['m']:,}")
     # em dash 는 cp949 콘솔에서 죽는다. int 로 감싸는 것도 필수 ― human() 은
     # 1000 미만이면 str(n) 을 그대로 돌려주므로 float 이 그대로 새어 나온다.
@@ -964,9 +1034,11 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
       { id: "sample-c", label: "빌드-서버",   os: "Ubuntu 24.04", days: 120, w: 0.3, hours: [2,3,4,9,14] }
     ];
     var models = [
-      ["claude-opus-5-20260401", 0.5],
-      ["claude-sonnet-4-5-20250929", 0.38],
-      ["claude-haiku-4-5-20251001", 0.12]
+      ["claude-opus-5", 0.34],
+      ["claude-sonnet-5", 0.29],
+      ["claude-opus-4-8", 0.17],
+      ["claude-fable-5", 0.12],
+      ["claude-haiku-4-5-20251001", 0.08]
     ];
     var projects = ["moonlog", "bookapp", "api-gateway", "scratch", "etl-jobs"];
     var today = todayKey();
@@ -986,31 +1058,34 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
         var cw = Math.round(msgs * (900 + rnd() * 2600));
         var ip = Math.round(msgs * (18 + rnd() * 42));
         var op = Math.round(msgs * (240 + rnd() * 720));
+        var cw1 = Math.round(cw * (0.16 + rnd() * 0.12));
+        var cw5 = Math.round(cw * (0.62 + rnd() * 0.08));
+        var th = Math.round(op * (0.24 + rnd() * 0.32));
         var ses = 1 + Math.round(rnd() * 3 * s.w);
         sessions += ses;
-        daily[day] = { i: ip, o: op, cw: cw, cr: cr, m: msgs, s: ses };
+        daily[day] = { i: ip, o: op, cw: cw, cr: cr, cw1: cw1, cw5: cw5, th: th, m: msgs, s: ses };
         var mi = rnd(); var acc = 0, mm = models[0][0];
         for (var k = 0; k < models.length; k++) { acc += models[k][1]; if (mi <= acc) { mm = models[k][0]; break; } }
         dailyModels[day] = {}; dailyModels[day][mm] = ip + op + cw + cr;
-        var b = mAgg[mm] || (mAgg[mm] = { i: 0, o: 0, cw: 0, cr: 0, m: 0 });
-        b.i += ip; b.o += op; b.cw += cw; b.cr += cr; b.m += msgs;
+        var b = mAgg[mm] || (mAgg[mm] = { i: 0, o: 0, cw: 0, cr: 0, cw1: 0, cw5: 0, th: 0, m: 0 });
+        b.i += ip; b.o += op; b.cw += cw; b.cr += cr; b.cw1 += cw1; b.cw5 += cw5; b.th += th; b.m += msgs;
         var pn = projects[Math.floor(rnd() * projects.length)];
-        var pb = pAgg[pn] || (pAgg[pn] = { i: 0, o: 0, cw: 0, cr: 0, m: 0, last: day });
-        pb.i += ip; pb.o += op; pb.cw += cw; pb.cr += cr; pb.m += msgs; pb.last = day;
+        var pb = pAgg[pn] || (pAgg[pn] = { i: 0, o: 0, cw: 0, cr: 0, cw1: 0, cw5: 0, th: 0, m: 0, last: day });
+        pb.i += ip; pb.o += op; pb.cw += cw; pb.cr += cr; pb.cw1 += cw1; pb.cw5 += cw5; pb.th += th; pb.m += msgs; pb.last = day;
         for (var h = 0; h < msgs; h++) {
           var hh = s.hours[Math.floor(rnd() * s.hours.length)];
           hours[hh]++; wh[wd][hh]++;
         }
       }
-      var tot = { i: 0, o: 0, cw: 0, cr: 0, m: 0 };
+      var tot = { i: 0, o: 0, cw: 0, cr: 0, cw1: 0, cw5: 0, th: 0, m: 0 };
       Object.keys(daily).forEach(function (d2) {
-        ["i","o","cw","cr","m"].forEach(function (k2) { tot[k2] += daily[d2][k2]; });
+        ["i","o","cw","cr","cw1","cw5","th","m"].forEach(function (k2) { tot[k2] += daily[d2][k2]; });
       });
       tot.total = tot.i + tot.o + tot.cw + tot.cr;
       tot.sessions = sessions;
       tot.active_days = Object.keys(daily).length;
       return {
-        schema: 1, sample: true,
+        schema: 2, sample: true,
         generated_at: new Date(Date.now() - Math.floor(rnd() * 5) * 3600000).toISOString(),
         tz: "Asia/Seoul",
         machine: { id: s.id, label: s.label, hostname: s.id, os: s.os },
@@ -1091,7 +1166,7 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
       return { day: day, per: per, total: tot, msgs: msgs, sessions: ses, cr: cr };
     });
 
-    var comp = { i: 0, o: 0, cw: 0, cr: 0 }, msgs = 0, sessions = 0;
+    var comp = { i: 0, o: 0, cw: 0, cr: 0, cw1: 0, cw5: 0, th: 0 }, msgs = 0, sessions = 0;
     var models = {}, projects = {}, hours = new Array(24).fill(0);
     var wh = []; for (var q = 0; q < 7; q++) wh.push(new Array(24).fill(0));
     var inWindow = !!from;
@@ -1102,6 +1177,7 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
         if (from && day < from) return;
         var b = M.daily[day];
         comp.i += b.i || 0; comp.o += b.o || 0; comp.cw += b.cw || 0; comp.cr += b.cr || 0;
+        comp.cw1 += b.cw1 || 0; comp.cw5 += b.cw5 || 0; comp.th += b.th || 0;
         msgs += b.m || 0; sessions += b.s || 0;
         var dm = (M.daily_models || {})[day] || {};
         Object.keys(dm).forEach(function (mo) { models[mo] = (models[mo] || 0) + dm[mo]; });
@@ -1605,11 +1681,35 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
       tbl.appendChild(tr);
     });
 
+    function subsetRow(name, value, parent) {
+      var tr = el("tr");
+      tr.appendChild(el("td", null, "↳ " + name));
+      tr.appendChild(el("td", "r", fmt(value)));
+      tr.appendChild(el("td", "r", pct(value, parent).toFixed(1) + "%"));
+      tbl.appendChild(tr);
+    }
+
+    var hasCacheSplit = (D.comp.cw1 || 0) > 0 || (D.comp.cw5 || 0) > 0;
+    if (hasCacheSplit) {
+      subsetRow("캐시 쓰기 1h", D.comp.cw1 || 0, D.comp.cw || 0);
+      subsetRow("캐시 쓰기 5m", D.comp.cw5 || 0, D.comp.cw || 0);
+      var remainder = (D.comp.cw || 0) - (D.comp.cw1 || 0) - (D.comp.cw5 || 0);
+      var remainderThreshold = Math.max(1000, (D.comp.cw || 0) * 0.001);
+      if (remainder >= remainderThreshold) subsetRow("캐시 쓰기 미분류", remainder, D.comp.cw || 0);
+    }
+    if ((D.comp.th || 0) > 0) {
+      subsetRow("출력 중 thinking", D.comp.th, D.comp.o || 0);
+    }
+
     var cacheShare = pct((D.comp.cr || 0) + (D.comp.cw || 0), total);
-    document.getElementById("compNote").textContent =
+    var note =
       "프롬프트 캐시가 전체의 " + cacheShare.toFixed(1) +
-      "%. 캐시 읽기는 새로 생성되는 토큰이 아니라 이전 컨텍스트를 다시 읽어들인 양이라, " +
-      "총량이 커 보여도 비용·한도 부담은 입·출력 토큰과 다릅니다.";
+      "%. 캐시 읽기는 새로 생성되는 토큰이 아니라 이전 컨텍스트를 다시 읽어들인 양입니다.";
+    if ((D.comp.th || 0) > 0) {
+      note += " 출력 중 " + pct(D.comp.th, D.comp.o || 0).toFixed(1) + "%가 thinking입니다.";
+    }
+    note += " 로컬 기록의 사용량 구성 참고치이며, 청구액이나 구독 한도를 뜻하지 않습니다.";
+    document.getElementById("compNote").textContent = note;
   }
 
   // ---- models
@@ -1787,11 +1887,28 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
   }
 
   // ------------------------------------------------------------ ingest
+  function normalizeBucket(b) {
+    if (!b) return;
+    ["cw1", "cw5", "th"].forEach(function (k) {
+      if (typeof b[k] !== "number" || !isFinite(b[k])) b[k] = 0;
+    });
+  }
+
+  function normalizePayload(payload) {
+    normalizeBucket(payload.totals);
+    ["daily", "models", "projects"].forEach(function (group) {
+      Object.keys(payload[group] || {}).forEach(function (key) {
+        normalizeBucket(payload[group][key]);
+      });
+    });
+  }
+
   function ingest(payload, quiet) {
-    if (!payload || payload.schema !== 1 || !payload.machine || !payload.machine.id) {
-      if (!quiet) alert("수집기 형식(schema 1)의 JSON이 아닙니다.");
+    if (!payload || (payload.schema !== 1 && payload.schema !== 2) || !payload.machine || !payload.machine.id) {
+      if (!quiet) alert("수집기 형식(schema 1 또는 2)의 JSON이 아닙니다.");
       return false;
     }
+    normalizePayload(payload);
     if (state.sample) { state.machines = {}; state.off = {}; state.sample = false; }
     var id = payload.machine.id;
     var prev = state.machines[id];
@@ -1855,7 +1972,7 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
   window.addEventListener("drop", function (e) { e.preventDefault(); });
 
   document.getElementById("btnExport").onclick = function () {
-    var out = { schema: 1, kind: "merged", generated_at: new Date().toISOString(),
+    var out = { schema: 2, kind: "merged", generated_at: new Date().toISOString(),
                 machines: Object.keys(state.machines).map(function (k) { return state.machines[k]; }) };
     var txt = JSON.stringify(out);
     (async function () {
@@ -2020,8 +2137,9 @@ def store_dir():
 def save_snapshot(payload):
     """다른 머신에서 받은 스냅샷을 로컬에 보관한다."""
     mid = payload.get("machine", {}).get("id")
-    if not mid or payload.get("schema") != 1:
+    if not mid or payload.get("schema") not in (1, 2):
         return False
+    normalize_payload_usage(payload)
     safe = re.sub(r"[^A-Za-z0-9_.-]", "-", str(mid))[:64]
     p = store_dir() / (safe + ".json")
     tmp = p.with_suffix(".tmp")
@@ -2039,8 +2157,8 @@ def load_remote(local_id=None):
                 d = _json.load(f)
         except (OSError, ValueError):
             continue
-        if d.get("schema") == 1 and d.get("machine", {}).get("id") != local_id:
-            out.append(d)
+        if d.get("schema") in (1, 2) and d.get("machine", {}).get("id") != local_id:
+            out.append(normalize_payload_usage(d))
     return out
 
 
@@ -2052,11 +2170,12 @@ def load_remote(local_id=None):
 # 파일마다 (크기, 수정시각, 읽은 위치, 뽑아낸 행)을 캐시해 두고,
 # 다음 스캔에서는 늘어난 꼬리만 파싱한다.
 #
-# 행 형식: [dedup, "YYYY-MM-DD", hour, weekday, model_idx, session_idx, i, o, cw, cr]
+# 행 형식: [dedup, "YYYY-MM-DD", hour, weekday, model_idx, session_idx,
+#             i, o, cw, cr, cw1, cw5, th]
 # 모델·세션 이름은 파일별 표에 두고 인덱스만 저장한다 (UUID 반복 제거).
 
 CACHE_DIR = STORE / "cache"
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 
 
 def _cache_path(rel):
@@ -2149,11 +2268,7 @@ def _read_rows(path, start_off, models, sessions):
             rows.append([
                 dedup, local.strftime("%Y-%m-%d"), local.hour, local.weekday(),
                 m_index[model], s_index[session],
-                int(usage.get("input_tokens") or 0),
-                int(usage.get("output_tokens") or 0),
-                int(usage.get("cache_creation_input_tokens") or 0),
-                int(usage.get("cache_read_input_tokens") or 0),
-            ])
+            ] + usage_values(usage))
     return rows, off
 
 
@@ -2307,8 +2422,7 @@ def build_payload_incremental(args):
                 continue
             if args.until and day > args.until:
                 continue
-            u = {"input_tokens": r[6], "output_tokens": r[7],
-                 "cache_creation_input_tokens": r[8], "cache_read_input_tokens": r[9]}
+            u = usage_from_values(r[6:])
             model = ms[r[4]] if r[4] < len(ms) else "unknown"
             session = ss[r[5]] if r[5] < len(ss) else "unknown"
 
@@ -2350,7 +2464,7 @@ def build_payload_incremental(args):
     days_sorted = sorted(daily.keys())
     totals = new_bucket()
     for b in daily.values():
-        for k in ("i", "o", "cw", "cr", "m"):
+        for k in BUCKET_KEYS:
             totals[k] += b.get(k, 0)
     totals["total"] = bucket_total(totals)
     totals["sessions"] = len(all_sessions)
@@ -3039,6 +3153,7 @@ def main():
     ap.add_argument("--since", help="시작일 YYYY-MM-DD")
     ap.add_argument("--until", help="종료일 YYYY-MM-DD")
     ap.add_argument("--pricing", help="비용 추정 단가표 JSON (USD/1M tokens)")
+    ap.add_argument("--print-summary", action="store_true", help="터미널에 사용량 요약 출력")
     args = ap.parse_args()
 
     if args.diag:
@@ -3057,6 +3172,8 @@ def main():
         do_push(args)
     elif args.export:
         do_export(args)
+    elif args.print_summary:
+        print_summary(scan_local(args))
     else:
         do_serve(args)
 

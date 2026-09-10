@@ -468,9 +468,11 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
       { id: "sample-c", label: "빌드-서버",   os: "Ubuntu 24.04", days: 120, w: 0.3, hours: [2,3,4,9,14] }
     ];
     var models = [
-      ["claude-opus-5-20260401", 0.5],
-      ["claude-sonnet-4-5-20250929", 0.38],
-      ["claude-haiku-4-5-20251001", 0.12]
+      ["claude-opus-5", 0.34],
+      ["claude-sonnet-5", 0.29],
+      ["claude-opus-4-8", 0.17],
+      ["claude-fable-5", 0.12],
+      ["claude-haiku-4-5-20251001", 0.08]
     ];
     var projects = ["moonlog", "bookapp", "api-gateway", "scratch", "etl-jobs"];
     var today = todayKey();
@@ -490,31 +492,34 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
         var cw = Math.round(msgs * (900 + rnd() * 2600));
         var ip = Math.round(msgs * (18 + rnd() * 42));
         var op = Math.round(msgs * (240 + rnd() * 720));
+        var cw1 = Math.round(cw * (0.16 + rnd() * 0.12));
+        var cw5 = Math.round(cw * (0.62 + rnd() * 0.08));
+        var th = Math.round(op * (0.24 + rnd() * 0.32));
         var ses = 1 + Math.round(rnd() * 3 * s.w);
         sessions += ses;
-        daily[day] = { i: ip, o: op, cw: cw, cr: cr, m: msgs, s: ses };
+        daily[day] = { i: ip, o: op, cw: cw, cr: cr, cw1: cw1, cw5: cw5, th: th, m: msgs, s: ses };
         var mi = rnd(); var acc = 0, mm = models[0][0];
         for (var k = 0; k < models.length; k++) { acc += models[k][1]; if (mi <= acc) { mm = models[k][0]; break; } }
         dailyModels[day] = {}; dailyModels[day][mm] = ip + op + cw + cr;
-        var b = mAgg[mm] || (mAgg[mm] = { i: 0, o: 0, cw: 0, cr: 0, m: 0 });
-        b.i += ip; b.o += op; b.cw += cw; b.cr += cr; b.m += msgs;
+        var b = mAgg[mm] || (mAgg[mm] = { i: 0, o: 0, cw: 0, cr: 0, cw1: 0, cw5: 0, th: 0, m: 0 });
+        b.i += ip; b.o += op; b.cw += cw; b.cr += cr; b.cw1 += cw1; b.cw5 += cw5; b.th += th; b.m += msgs;
         var pn = projects[Math.floor(rnd() * projects.length)];
-        var pb = pAgg[pn] || (pAgg[pn] = { i: 0, o: 0, cw: 0, cr: 0, m: 0, last: day });
-        pb.i += ip; pb.o += op; pb.cw += cw; pb.cr += cr; pb.m += msgs; pb.last = day;
+        var pb = pAgg[pn] || (pAgg[pn] = { i: 0, o: 0, cw: 0, cr: 0, cw1: 0, cw5: 0, th: 0, m: 0, last: day });
+        pb.i += ip; pb.o += op; pb.cw += cw; pb.cr += cr; pb.cw1 += cw1; pb.cw5 += cw5; pb.th += th; pb.m += msgs; pb.last = day;
         for (var h = 0; h < msgs; h++) {
           var hh = s.hours[Math.floor(rnd() * s.hours.length)];
           hours[hh]++; wh[wd][hh]++;
         }
       }
-      var tot = { i: 0, o: 0, cw: 0, cr: 0, m: 0 };
+      var tot = { i: 0, o: 0, cw: 0, cr: 0, cw1: 0, cw5: 0, th: 0, m: 0 };
       Object.keys(daily).forEach(function (d2) {
-        ["i","o","cw","cr","m"].forEach(function (k2) { tot[k2] += daily[d2][k2]; });
+        ["i","o","cw","cr","cw1","cw5","th","m"].forEach(function (k2) { tot[k2] += daily[d2][k2]; });
       });
       tot.total = tot.i + tot.o + tot.cw + tot.cr;
       tot.sessions = sessions;
       tot.active_days = Object.keys(daily).length;
       return {
-        schema: 1, sample: true,
+        schema: 2, sample: true,
         generated_at: new Date(Date.now() - Math.floor(rnd() * 5) * 3600000).toISOString(),
         tz: "Asia/Seoul",
         machine: { id: s.id, label: s.label, hostname: s.id, os: s.os },
@@ -595,7 +600,7 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
       return { day: day, per: per, total: tot, msgs: msgs, sessions: ses, cr: cr };
     });
 
-    var comp = { i: 0, o: 0, cw: 0, cr: 0 }, msgs = 0, sessions = 0;
+    var comp = { i: 0, o: 0, cw: 0, cr: 0, cw1: 0, cw5: 0, th: 0 }, msgs = 0, sessions = 0;
     var models = {}, projects = {}, hours = new Array(24).fill(0);
     var wh = []; for (var q = 0; q < 7; q++) wh.push(new Array(24).fill(0));
     var inWindow = !!from;
@@ -606,6 +611,7 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
         if (from && day < from) return;
         var b = M.daily[day];
         comp.i += b.i || 0; comp.o += b.o || 0; comp.cw += b.cw || 0; comp.cr += b.cr || 0;
+        comp.cw1 += b.cw1 || 0; comp.cw5 += b.cw5 || 0; comp.th += b.th || 0;
         msgs += b.m || 0; sessions += b.s || 0;
         var dm = (M.daily_models || {})[day] || {};
         Object.keys(dm).forEach(function (mo) { models[mo] = (models[mo] || 0) + dm[mo]; });
@@ -1109,11 +1115,35 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
       tbl.appendChild(tr);
     });
 
+    function subsetRow(name, value, parent) {
+      var tr = el("tr");
+      tr.appendChild(el("td", null, "↳ " + name));
+      tr.appendChild(el("td", "r", fmt(value)));
+      tr.appendChild(el("td", "r", pct(value, parent).toFixed(1) + "%"));
+      tbl.appendChild(tr);
+    }
+
+    var hasCacheSplit = (D.comp.cw1 || 0) > 0 || (D.comp.cw5 || 0) > 0;
+    if (hasCacheSplit) {
+      subsetRow("캐시 쓰기 1h", D.comp.cw1 || 0, D.comp.cw || 0);
+      subsetRow("캐시 쓰기 5m", D.comp.cw5 || 0, D.comp.cw || 0);
+      var remainder = (D.comp.cw || 0) - (D.comp.cw1 || 0) - (D.comp.cw5 || 0);
+      var remainderThreshold = Math.max(1000, (D.comp.cw || 0) * 0.001);
+      if (remainder >= remainderThreshold) subsetRow("캐시 쓰기 미분류", remainder, D.comp.cw || 0);
+    }
+    if ((D.comp.th || 0) > 0) {
+      subsetRow("출력 중 thinking", D.comp.th, D.comp.o || 0);
+    }
+
     var cacheShare = pct((D.comp.cr || 0) + (D.comp.cw || 0), total);
-    document.getElementById("compNote").textContent =
+    var note =
       "프롬프트 캐시가 전체의 " + cacheShare.toFixed(1) +
-      "%. 캐시 읽기는 새로 생성되는 토큰이 아니라 이전 컨텍스트를 다시 읽어들인 양이라, " +
-      "총량이 커 보여도 비용·한도 부담은 입·출력 토큰과 다릅니다.";
+      "%. 캐시 읽기는 새로 생성되는 토큰이 아니라 이전 컨텍스트를 다시 읽어들인 양입니다.";
+    if ((D.comp.th || 0) > 0) {
+      note += " 출력 중 " + pct(D.comp.th, D.comp.o || 0).toFixed(1) + "%가 thinking입니다.";
+    }
+    note += " 로컬 기록의 사용량 구성 참고치이며, 청구액이나 구독 한도를 뜻하지 않습니다.";
+    document.getElementById("compNote").textContent = note;
   }
 
   // ---- models
@@ -1291,11 +1321,28 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
   }
 
   // ------------------------------------------------------------ ingest
+  function normalizeBucket(b) {
+    if (!b) return;
+    ["cw1", "cw5", "th"].forEach(function (k) {
+      if (typeof b[k] !== "number" || !isFinite(b[k])) b[k] = 0;
+    });
+  }
+
+  function normalizePayload(payload) {
+    normalizeBucket(payload.totals);
+    ["daily", "models", "projects"].forEach(function (group) {
+      Object.keys(payload[group] || {}).forEach(function (key) {
+        normalizeBucket(payload[group][key]);
+      });
+    });
+  }
+
   function ingest(payload, quiet) {
-    if (!payload || payload.schema !== 1 || !payload.machine || !payload.machine.id) {
-      if (!quiet) alert("수집기 형식(schema 1)의 JSON이 아닙니다.");
+    if (!payload || (payload.schema !== 1 && payload.schema !== 2) || !payload.machine || !payload.machine.id) {
+      if (!quiet) alert("수집기 형식(schema 1 또는 2)의 JSON이 아닙니다.");
       return false;
     }
+    normalizePayload(payload);
     if (state.sample) { state.machines = {}; state.off = {}; state.sample = false; }
     var id = payload.machine.id;
     var prev = state.machines[id];
@@ -1359,7 +1406,7 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
   window.addEventListener("drop", function (e) { e.preventDefault(); });
 
   document.getElementById("btnExport").onclick = function () {
-    var out = { schema: 1, kind: "merged", generated_at: new Date().toISOString(),
+    var out = { schema: 2, kind: "merged", generated_at: new Date().toISOString(),
                 machines: Object.keys(state.machines).map(function (k) { return state.machines[k]; }) };
     var txt = JSON.stringify(out);
     (async function () {

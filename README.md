@@ -208,9 +208,9 @@ python3 claude-usage.py --diag
 
 ```json
 {
-  "opus":   { "input": 0, "output": 0, "cache_write": 0, "cache_read": 0 },
-  "sonnet": { "input": 0, "output": 0, "cache_write": 0, "cache_read": 0 },
-  "haiku":  { "input": 0, "output": 0, "cache_write": 0, "cache_read": 0 }
+  "opus":   { "input": 0, "output": 0, "cache_write": 0, "cache_write_1h": 0, "cache_write_5m": 0, "cache_read": 0 },
+  "sonnet": { "input": 0, "output": 0, "cache_write": 0, "cache_write_1h": 0, "cache_write_5m": 0, "cache_read": 0 },
+  "haiku":  { "input": 0, "output": 0, "cache_write": 0, "cache_write_1h": 0, "cache_write_5m": 0, "cache_read": 0 }
 }
 ```
 
@@ -236,27 +236,28 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=https://<collector>/v1/metrics
 메트릭: `claude_code.token.usage`, `claude_code.cost.usage`,
 `claude_code.session.count`, `claude_code.active_time.total`.
 
-## 출력 JSON (schema 1)
+## 출력 JSON (schema 2)
 
 ```jsonc
 {
-  "schema": 1,
+  "schema": 2,
   "generated_at": "2026-09-10T02:00:00+00:00",
   "tz": "Asia/Seoul",
   "machine": { "id": "9f2c…", "label": "집-데스크탑", "hostname": "…", "os": "…" },
   "range":   { "first": "2026-02-11", "last": "2026-09-10" },
-  "totals":  { "i":0, "o":0, "cw":0, "cr":0, "m":0, "total":0,
-               "sessions":0, "active_days":0 },
-  "daily":   { "2026-09-10": { "i":0,"o":0,"cw":0,"cr":0,"m":0,"s":0 } },
+  "totals":  { "i":0, "o":0, "cw":0, "cr":0, "cw1":0, "cw5":0, "th":0, "m":0, "total":0,
+                "sessions":0, "active_days":0 },
+  "daily":   { "2026-09-10": { "i":0,"o":0,"cw":0,"cr":0,"cw1":0,"cw5":0,"th":0,"m":0,"s":0 } },
   "daily_models": { "2026-09-10": { "claude-opus-…": 0 } },
-  "models":  { "claude-opus-…": { "i":0,"o":0,"cw":0,"cr":0,"m":0 } },
-  "projects":{ "myapp": { "i":0,"o":0,"cw":0,"cr":0,"m":0,"last":"2026-09-10" } },
+  "models":  { "claude-opus-…": { "i":0,"o":0,"cw":0,"cr":0,"cw1":0,"cw5":0,"th":0,"m":0 } },
+  "projects":{ "myapp": { "i":0,"o":0,"cw":0,"cr":0,"cw1":0,"cw5":0,"th":0,"m":0,"last":"2026-09-10" } },
   "hours":   [0, …24개],
   "weekday_hour": [[…24개] ×7]
 }
 ```
 
 `i` 입력, `o` 출력, `cw` 캐시 쓰기, `cr` 캐시 읽기, `m` 메시지, `s` 세션.
+`cw1`/`cw5`는 `cw`의 1시간/5분 캐시 쓰기 부분집합이고, `th`는 `o`의 thinking 부분집합이다.
 머신 id는 hostname+플랫폼 해시라 같은 머신에서 다시 돌리면 같은 값이 나온다.
 
 ## 소스 구성

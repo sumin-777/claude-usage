@@ -77,8 +77,9 @@ def store_dir():
 def save_snapshot(payload):
     """다른 머신에서 받은 스냅샷을 로컬에 보관한다."""
     mid = payload.get("machine", {}).get("id")
-    if not mid or payload.get("schema") != 1:
+    if not mid or payload.get("schema") not in (1, 2):
         return False
+    normalize_payload_usage(payload)
     safe = re.sub(r"[^A-Za-z0-9_.-]", "-", str(mid))[:64]
     p = store_dir() / (safe + ".json")
     tmp = p.with_suffix(".tmp")
@@ -96,8 +97,8 @@ def load_remote(local_id=None):
                 d = _json.load(f)
         except (OSError, ValueError):
             continue
-        if d.get("schema") == 1 and d.get("machine", {}).get("id") != local_id:
-            out.append(d)
+        if d.get("schema") in (1, 2) and d.get("machine", {}).get("id") != local_id:
+            out.append(normalize_payload_usage(d))
     return out
 
 
@@ -109,11 +110,12 @@ def load_remote(local_id=None):
 # 파일마다 (크기, 수정시각, 읽은 위치, 뽑아낸 행)을 캐시해 두고,
 # 다음 스캔에서는 늘어난 꼬리만 파싱한다.
 #
-# 행 형식: [dedup, "YYYY-MM-DD", hour, weekday, model_idx, session_idx, i, o, cw, cr]
+# 행 형식: [dedup, "YYYY-MM-DD", hour, weekday, model_idx, session_idx,
+#             i, o, cw, cr, cw1, cw5, th]
 # 모델·세션 이름은 파일별 표에 두고 인덱스만 저장한다 (UUID 반복 제거).
 
 CACHE_DIR = STORE / "cache"
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 
 
 def _cache_path(rel):
@@ -206,11 +208,7 @@ def _read_rows(path, start_off, models, sessions):
             rows.append([
                 dedup, local.strftime("%Y-%m-%d"), local.hour, local.weekday(),
                 m_index[model], s_index[session],
-                int(usage.get("input_tokens") or 0),
-                int(usage.get("output_tokens") or 0),
-                int(usage.get("cache_creation_input_tokens") or 0),
-                int(usage.get("cache_read_input_tokens") or 0),
-            ])
+            ] + usage_values(usage))
     return rows, off
 
 
@@ -364,8 +362,7 @@ def build_payload_incremental(args):
                 continue
             if args.until and day > args.until:
                 continue
-            u = {"input_tokens": r[6], "output_tokens": r[7],
-                 "cache_creation_input_tokens": r[8], "cache_read_input_tokens": r[9]}
+            u = usage_from_values(r[6:])
             model = ms[r[4]] if r[4] < len(ms) else "unknown"
             session = ss[r[5]] if r[5] < len(ss) else "unknown"
 
@@ -407,7 +404,7 @@ def build_payload_incremental(args):
     days_sorted = sorted(daily.keys())
     totals = new_bucket()
     for b in daily.values():
-        for k in ("i", "o", "cw", "cr", "m"):
+        for k in BUCKET_KEYS:
             totals[k] += b.get(k, 0)
     totals["total"] = bucket_total(totals)
     totals["sessions"] = len(all_sessions)
@@ -1096,6 +1093,7 @@ def main():
     ap.add_argument("--since", help="시작일 YYYY-MM-DD")
     ap.add_argument("--until", help="종료일 YYYY-MM-DD")
     ap.add_argument("--pricing", help="비용 추정 단가표 JSON (USD/1M tokens)")
+    ap.add_argument("--print-summary", action="store_true", help="터미널에 사용량 요약 출력")
     args = ap.parse_args()
 
     if args.diag:
@@ -1114,6 +1112,8 @@ def main():
         do_push(args)
     elif args.export:
         do_export(args)
+    elif args.print_summary:
+        print_summary(scan_local(args))
     else:
         do_serve(args)
 

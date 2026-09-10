@@ -31,15 +31,21 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Claude Code가 usage를 기록하는 필드들
-USAGE_FIELDS = (
-    ("input_tokens", "i"),
-    ("output_tokens", "o"),
-    ("cache_creation_input_tokens", "cw"),
-    ("cache_read_input_tokens", "cr"),
+LEGACY_USAGE_FIELDS = (
+    (("input_tokens",), "i"),
+    (("output_tokens",), "o"),
+    (("cache_creation_input_tokens",), "cw"),
+    (("cache_read_input_tokens",), "cr"),
 )
+USAGE_FIELDS = LEGACY_USAGE_FIELDS + (
+    (("cache_creation", "ephemeral_1h_input_tokens"), "cw1"),
+    (("cache_creation", "ephemeral_5m_input_tokens"), "cw5"),
+    (("output_tokens_details", "thinking_tokens"), "th"),
+)
+BUCKET_KEYS = ("i", "o", "cw", "cr", "cw1", "cw5", "th", "m")
 
 # 집계에서 제외할 model 값
 SKIP_MODELS = {"<synthetic>", "synthetic", None, ""}
@@ -121,14 +127,56 @@ def machine_identity(label):
 
 
 def new_bucket():
-    return {"i": 0, "o": 0, "cw": 0, "cr": 0, "m": 0}
+    return {k: 0 for k in BUCKET_KEYS}
+
+
+def normalize_payload_usage(payload):
+    for bucket in [payload.get("totals", {})]:
+        if isinstance(bucket, dict):
+            for key in ("cw1", "cw5", "th"):
+                bucket.setdefault(key, 0)
+    for section in ("daily", "models", "projects"):
+        buckets = payload.get(section, {})
+        if not isinstance(buckets, dict):
+            continue
+        for bucket in buckets.values():
+            if isinstance(bucket, dict):
+                for key in ("cw1", "cw5", "th"):
+                    bucket.setdefault(key, 0)
+    return payload
+
+
+def usage_value(usage, path):
+    value = usage
+    for part in path:
+        if not isinstance(value, dict):
+            return 0
+        value = value.get(part)
+    if not isinstance(value, (int, float)) or value <= 0:
+        return 0
+    try:
+        return int(value)
+    except (OverflowError, ValueError):
+        return 0
+
+
+def usage_values(usage):
+    return [usage_value(usage, path) for path, _ in USAGE_FIELDS]
+
+
+def usage_from_values(values):
+    usage = {}
+    for value, (path, _) in zip(values, USAGE_FIELDS):
+        target = usage
+        for part in path[:-1]:
+            target = target.setdefault(part, {})
+        target[path[-1]] = value
+    return usage
 
 
 def add_usage(bucket, u):
-    for src, dst in USAGE_FIELDS:
-        v = u.get(src)
-        if isinstance(v, (int, float)) and v > 0:
-            bucket[dst] += int(v)
+    for path, dst in USAGE_FIELDS:
+        bucket[dst] = bucket.get(dst, 0) + usage_value(u, path)
     bucket["m"] += 1
 
 
@@ -242,9 +290,7 @@ def aggregate(root, since=None, until=None, verbose=False):
         add_usage(models[rec["model"]], u)
         add_usage(projects[rec["project"]], u)
 
-        tot = sum(
-            int(u.get(src, 0) or 0) for src, _ in USAGE_FIELDS
-        )
+        tot = sum(usage_value(u, path) for path, _ in LEGACY_USAGE_FIELDS)
         daily_models[day][rec["model"]] += tot
 
         hours[local_dt.hour] += 1
@@ -304,7 +350,8 @@ def streaks(days_sorted):
 def load_pricing(path):
     """
     비용 추정용 단가표. USD / 1M tokens 기준.
-    형식: {"model-substring": {"input":X,"output":Y,"cache_write":Z,"cache_read":W}, ...}
+    형식: {"model-substring": {"input":X,"output":Y,"cache_write":Z,
+          "cache_write_1h":A,"cache_write_5m":B,"cache_read":W}, ...}
     부분 문자열 매칭(가장 긴 것 우선). 단가는 사용자가 직접 채워야 한다.
     """
     if not path:
@@ -318,6 +365,7 @@ def estimate_cost(models_agg, pricing):
         return None
     keys = sorted(pricing.keys(), key=len, reverse=True)
     per_model = {}
+    pricing_mode = {}
     total = 0.0
     unmatched = []
     for model, b in models_agg.items():
@@ -326,10 +374,22 @@ def estimate_cost(models_agg, pricing):
             unmatched.append(model)
             continue
         p = pricing[hit]
+        split = "cache_write_1h" in p or "cache_write_5m" in p
+        if split:
+            remainder = max(0, b.get("cw", 0) - b.get("cw1", 0) - b.get("cw5", 0))
+            cache_cost = (
+                b.get("cw1", 0) * p.get("cache_write_1h", p.get("cache_write", 0))
+                + b.get("cw5", 0) * p.get("cache_write_5m", p.get("cache_write", 0))
+                + remainder * p.get("cache_write", 0)
+            )
+            pricing_mode[model] = "split"
+        else:
+            cache_cost = b.get("cw", 0) * p.get("cache_write", 0)
+            pricing_mode[model] = "legacy"
         c = (
             b["i"] * p.get("input", 0)
             + b["o"] * p.get("output", 0)
-            + b["cw"] * p.get("cache_write", 0)
+            + cache_cost
             + b["cr"] * p.get("cache_read", 0)
         ) / 1_000_000
         per_model[model] = round(c, 4)
@@ -338,6 +398,7 @@ def estimate_cost(models_agg, pricing):
         "currency": "USD",
         "total": round(total, 2),
         "per_model": per_model,
+        "pricing_mode": pricing_mode,
         "unpriced_models": unmatched,
         "note": "사용자 제공 단가표 기반 추정치. 실제 청구액이 아님.",
     }
@@ -363,7 +424,7 @@ def build_payload(args):
 
     totals = new_bucket()
     for b in daily.values():
-        for k in ("i", "o", "cw", "cr", "m"):
+        for k in BUCKET_KEYS:
             totals[k] += b.get(k, 0)
     totals["total"] = bucket_total(totals)
     totals["sessions"] = agg["sessions"]
@@ -447,6 +508,15 @@ def print_summary(p):
         f"    입력 {human(t['i'])} / 출력 {human(t['o'])} / "
         f"캐시쓰기 {human(t['cw'])} / 캐시읽기 {human(t['cr'])}"
     )
+    if t.get("cw1", 0) or t.get("cw5", 0):
+        remainder = t["cw"] - t.get("cw1", 0) - t.get("cw5", 0)
+        detail = f"    캐시 쓰기 중 1h {human(t.get('cw1', 0))} / 5m {human(t.get('cw5', 0))}"
+        if remainder > 0:
+            detail += f" / 미분류 {human(remainder)}"
+        print(detail)
+    if t.get("th", 0):
+        share = (t["th"] / t["o"] * 100) if t["o"] else 0
+        print(f"    출력 중 thinking {human(t['th'])} ({share:.1f}%)")
     print(f"  메시지        {t['m']:,}")
     # em dash 는 cp949 콘솔에서 죽는다. int 로 감싸는 것도 필수 ― human() 은
     # 1000 미만이면 str(n) 을 그대로 돌려주므로 float 이 그대로 새어 나온다.

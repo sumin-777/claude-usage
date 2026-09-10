@@ -17,14 +17,30 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-KEYS = ("i", "o", "cw", "cr", "m")
+SCHEMA_VERSION = 2
+KEYS = ("i", "o", "cw", "cr", "cw1", "cw5", "th", "m")
 
 
 def merge_bucket(dst, src):
     for k in KEYS:
-        if k in src:
-            dst[k] = dst.get(k, 0) + src[k]
+        dst[k] = dst.get(k, 0) + src.get(k, 0)
     return dst
+
+
+def normalize_machine(d):
+    for bucket in [d.get("totals", {})]:
+        if isinstance(bucket, dict):
+            for key in ("cw1", "cw5", "th"):
+                bucket.setdefault(key, 0)
+    for section in ("daily", "models", "projects"):
+        buckets = d.get(section, {})
+        if not isinstance(buckets, dict):
+            continue
+        for bucket in buckets.values():
+            if isinstance(bucket, dict):
+                for key in ("cw1", "cw5", "th"):
+                    bucket.setdefault(key, 0)
+    return d
 
 
 def load_machines(paths):
@@ -37,9 +53,10 @@ def load_machines(paths):
         except (OSError, json.JSONDecodeError) as e:
             print(f"  ! 건너뜀 {p}: {e}", file=sys.stderr)
             continue
-        if d.get("schema") != 1 or "machine" not in d:
+        if d.get("schema") not in (1, 2) or "machine" not in d:
             print(f"  ! 형식 불일치, 건너뜀: {p}", file=sys.stderr)
             continue
+        normalize_machine(d)
         mid = d["machine"]["id"]
         prev = best.get(mid)
         if prev is None or d.get("generated_at", "") > prev.get("generated_at", ""):
@@ -96,7 +113,7 @@ def merge(machines):
         cur = run if (datetime.now().date() - dates[-1]).days <= 1 else 0
 
     return {
-        "schema": 1,
+        "schema": SCHEMA_VERSION,
         "kind": "merged",
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "machines": [
