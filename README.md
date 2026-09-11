@@ -63,6 +63,14 @@ python3 claude-usage.py --stop
 
 Windows에서는 `--daemon` 이 `pythonw.exe` 로 띄우므로 콘솔 창이 뜨지 않는다.
 
+**Windows 에서 주의할 것**
+
+- 명령의 `python3` 는 `python` 으로 바꿔 친다. Windows 의 `python3` 는 Microsoft Store
+  앱 실행 별칭인 경우가 많아, 설치한 Python 대신 Store 나 설치 관리자를 부를 수 있다.
+- Windows PowerShell 5.1 에서는 `&&` 로 명령을 이을 수 없다(`&` 도 마찬가지).
+  `--stop` 과 `--daemon` 을 이어 칠 때는 `;` 를 쓰거나 한 줄씩 친다. `|` 로 이으면
+  두 명령이 **동시에** 돌아서 끄는 쪽과 켜는 쪽이 엉킨다.
+
 ## 여러 대를 한 화면에
 
 데이터가 어떤 식으로든 대시보드를 띄운 PC로 와야 한다. 상황에 맞는 것 하나만 고른다.
@@ -116,7 +124,7 @@ python3 claude-usage.py --daemon --watch ~/Dropbox/claude-usage
 | 옵션 | 설명 |
 |---|---|
 | `--daemon` | 백그라운드로 띄우고 터미널을 돌려준다 |
-| `--status` / `--stop` | 상태 확인 / 종료 |
+| `--status` / `--stop` | 상태 확인 / 종료. `--stop` 은 기록된 인스턴스가 응답하고 python 일 때만 끄고, 아니면 기록만 지운다 |
 | `--host 0.0.0.0` | 다른 머신이 `--push` 로 보낼 수 있게 연다 (기본은 로컬 전용) |
 | `--port N` | 기본 8787 |
 | `--watch DIR` | 공유 폴더를 읽어들인다 (여러 번 지정 가능) |
@@ -130,6 +138,7 @@ python3 claude-usage.py --daemon --watch ~/Dropbox/claude-usage
 | `--since` / `--until` | `YYYY-MM-DD` 기간 제한 |
 | `--pricing FILE` | 단가표를 주면 비용을 추정한다 |
 | `--diag` | 데이터 규모와 스캔 시간 출력 (느릴 때 원인 확인용) |
+| `--print-summary` | 사용량 요약만 터미널에 출력하고 종료 (캐시 쓰기 1h/5m, thinking 비중 포함) |
 | `--clear-cache` | 스캔 캐시 삭제 |
 | `--no-browser` | 브라우저를 자동으로 열지 않는다 |
 

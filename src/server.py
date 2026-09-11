@@ -777,6 +777,19 @@ def do_daemon(args):
         webbrowser.open(url)
 
 
+def _pid_is_python(pid):
+    """Windows 에서는 그 pid 가 python 인터프리터인지 확인한다. 다른 OS 는 생략."""
+    if platform.system() != "Windows":
+        return True
+    try:
+        out = subprocess.check_output(
+            ["tasklist", "/FI", f"PID eq {int(pid)}", "/FO", "CSV", "/NH"],
+            stderr=subprocess.DEVNULL)
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        return False
+    return b"python" in out.lower()
+
+
 def do_stop(args):
     try:
         info = _json.loads(PIDFILE.read_text(encoding="utf-8"))
@@ -784,8 +797,14 @@ def do_stop(args):
         print("\n  백그라운드로 돌고 있는 것이 없습니다.\n")
         return
     pid = info.get("pid")
+    port = info.get("port", 8787)
+    # 기록된 pid 가 아직 우리 데몬인지부터 본다. 데몬이 기록을 못 지우고 죽으면
+    # (띄운 앱과 함께 강제 종료되는 경우 등) Windows 는 그 pid 를 곧 다른 프로세스에
+    # 다시 준다. 확인 없이 taskkill /F 하면 그 엉뚱한 프로세스가 죽는다.
+    alive = _ping(info.get("host", "127.0.0.1"), port)
+    ours = bool(pid) and alive and _pid_is_python(pid)
     ok = False
-    if pid:
+    if ours:
         if platform.system() == "Windows":
             ok = os.system(f"taskkill /PID {pid} /F >nul 2>&1") == 0
         else:
@@ -800,8 +819,14 @@ def do_stop(args):
         pass
     if ok:
         print(f"\n  종료했습니다 (pid {pid}).\n")
+    elif ours:
+        print(f"\n  pid {pid} 를 종료하지 못했습니다.\n")
+    elif not alive:
+        print(f"\n  기록된 인스턴스(pid {pid})가 응답하지 않아 이미 꺼진 것으로 봅니다.")
+        print("  그 pid 는 지금 다른 프로세스일 수 있어 건드리지 않고 기록만 지웠습니다.\n")
     else:
-        print(f"\n  pid {pid} 프로세스를 찾지 못했습니다. 이미 꺼져 있던 것 같습니다.\n")
+        print(f"\n  포트 {port} 는 응답하지만 pid {pid} 가 python 이 아닙니다. 기록이 어긋나 있어")
+        print(f"  아무것도 끄지 않고 기록만 지웠습니다. 포트 {port} 에 떠 있는 것은 직접 확인하세요.\n")
 
 
 def do_status(args):
