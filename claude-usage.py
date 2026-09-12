@@ -276,6 +276,7 @@ def parse_codex_file(path, start_off=0, previous_total=None):
     """Codex JSONL 의 완결된 꼬리만 읽는다."""
     daily = {}
     newest = None
+    peaks = {}
     off = start_off
     try:
         fh = open(str(path), "rb")
@@ -316,27 +317,42 @@ def parse_codex_file(path, start_off=0, previous_total=None):
                 add_bucket(daily.setdefault(day, new_bucket()), codex_bucket(last))
                 previous_total = total
             limits = payload.get("rate_limits")
-            if dt is not None and isinstance(limits, dict) and (newest is None or timestamp > newest["at"]):
+            if dt is not None and isinstance(limits, dict):
                 windows = []
                 for name in ("primary", "secondary"):
                     window = limits.get(name)
                     if isinstance(window, dict):
                         windows.append({k: window.get(k) for k in
                                         ("used_percent", "window_minutes", "resets_at")})
-                newest = {"at": timestamp, "plan": limits.get("plan_type"), "windows": windows}
+                # 같은 창 안에서도 보고값이 크게 오르내린다(2026-08-11 실측 9%~38%).
+                # 마지막 값만 쓰면 과소 표시되므로 창별 최고치를 따로 모은다.
+                for w in windows:
+                    pct = w.get("used_percent")
+                    if pct is not None:
+                        key = "%s:%s" % (w.get("window_minutes"), w.get("resets_at"))
+                        peaks[key] = max(peaks.get(key, 0.0), float(pct))
+                if newest is None or timestamp > newest["at"]:
+                    newest = {"at": timestamp, "plan": limits.get("plan_type"), "windows": windows}
+    if newest is not None and peaks:
+        newest["peaks"] = peaks
     return daily, previous_total, newest, off
 
 
 def make_codex_payload(entries, since=None, until=None):
     daily = {}
     newest = None
+    peaks = {}
     for entry in entries:
         for day, src in entry.get("daily", {}).items():
             if (since and day < since) or (until and day > until):
                 continue
             add_bucket(daily.setdefault(day, new_bucket()), src)
         limit = entry.get("limits")
-        if limit and (newest is None or limit.get("at", "") > newest.get("at", "")):
+        if not limit:
+            continue
+        for key, pct in (limit.get("peaks") or {}).items():
+            peaks[key] = max(peaks.get(key, 0.0), pct)
+        if newest is None or limit.get("at", "") > newest.get("at", ""):
             newest = limit
     if not daily and newest is None:
         return None
@@ -346,7 +362,16 @@ def make_codex_payload(entries, since=None, until=None):
     totals["total"] = bucket_total(totals)
     out = {"daily": daily, "totals": totals}
     if newest is not None:
-        out["limits"] = newest
+        # 캐시에 든 원본은 건드리지 않는다. 내부용 peaks 는 내보내지 않고
+        # 창마다 그 창의 최고치(peak_percent)만 붙인다.
+        windows = []
+        for w in newest.get("windows", []):
+            w = dict(w)
+            peak = peaks.get("%s:%s" % (w.get("window_minutes"), w.get("resets_at")))
+            if peak is not None:
+                w["peak_percent"] = peak
+            windows.append(w)
+        out["limits"] = {"at": newest.get("at"), "plan": newest.get("plan"), "windows": windows}
     return out
 
 
@@ -1609,13 +1634,16 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
     if (newest) {
       (newest.windows || []).forEach(function (w) {
         var stale = w.resets_at && w.resets_at * 1000 < Date.now();
+        var last = Number(w.used_percent || 0);
+        var peak = Math.max(Number(w.peak_percent || 0), last);
         var row = el("div", "limit-meter" + (stale ? " stale" : ""));
         row.appendChild(el("div", null, windowName(w.window_minutes) + " " +
-          Number(w.used_percent || 0).toFixed(1) + "% · 리셋 " + localTime(w.resets_at) +
+          peak.toFixed(1) + "%" + (peak - last >= 1 ? " (최근 보고 " + last.toFixed(1) + "%)" : "") +
+          " · 리셋 " + localTime(w.resets_at) +
           (newest.plan ? " · " + newest.plan : "") + " · " + localTime(newest.at) + " 기준" +
           " · " + state.machines[newestId].machine.label + (stale ? " · 만료됨" : "")));
         var mini = el("div", "mini"), fill = el("i");
-        fill.style.width = Math.max(0, Math.min(100, Number(w.used_percent || 0))) + "%";
+        fill.style.width = Math.max(0, Math.min(100, peak)) + "%";
         mini.appendChild(fill); row.appendChild(mini); limits.appendChild(row);
       });
     }
@@ -2711,9 +2739,16 @@ def _codex_entries():
                 for day, bucket in daily.items():
                     add_bucket(entry.setdefault("daily", {}).setdefault(day, new_bucket()), bucket)
                 entry["last"], entry["off"] = last, off
-                if limits and (not entry.get("limits") or
-                               limits.get("at", "") > entry["limits"].get("at", "")):
-                    entry["limits"] = limits
+                if limits:
+                    # 꼬리만 다시 읽어도 창별 최고치는 잃지 않게 합친다.
+                    old = entry.get("limits") or {}
+                    peaks = dict(old.get("peaks") or {})
+                    for key, pct in (limits.get("peaks") or {}).items():
+                        peaks[key] = max(peaks.get(key, 0.0), pct)
+                    if not old or limits.get("at", "") > old.get("at", ""):
+                        entry["limits"] = limits
+                    if peaks:
+                        entry["limits"]["peaks"] = peaks
                 entry["sz"], entry["mt"] = size, mtime
             else:
                 daily, last, limits, off = parse_codex_file(path)

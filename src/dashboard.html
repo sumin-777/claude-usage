@@ -841,13 +841,16 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
     if (newest) {
       (newest.windows || []).forEach(function (w) {
         var stale = w.resets_at && w.resets_at * 1000 < Date.now();
+        var last = Number(w.used_percent || 0);
+        var peak = Math.max(Number(w.peak_percent || 0), last);
         var row = el("div", "limit-meter" + (stale ? " stale" : ""));
         row.appendChild(el("div", null, windowName(w.window_minutes) + " " +
-          Number(w.used_percent || 0).toFixed(1) + "% · 리셋 " + localTime(w.resets_at) +
+          peak.toFixed(1) + "%" + (peak - last >= 1 ? " (최근 보고 " + last.toFixed(1) + "%)" : "") +
+          " · 리셋 " + localTime(w.resets_at) +
           (newest.plan ? " · " + newest.plan : "") + " · " + localTime(newest.at) + " 기준" +
           " · " + state.machines[newestId].machine.label + (stale ? " · 만료됨" : "")));
         var mini = el("div", "mini"), fill = el("i");
-        fill.style.width = Math.max(0, Math.min(100, Number(w.used_percent || 0))) + "%";
+        fill.style.width = Math.max(0, Math.min(100, peak)) + "%";
         mini.appendChild(fill); row.appendChild(mini); limits.appendChild(row);
       });
     }

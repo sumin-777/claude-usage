@@ -314,9 +314,16 @@ def _codex_entries():
                 for day, bucket in daily.items():
                     add_bucket(entry.setdefault("daily", {}).setdefault(day, new_bucket()), bucket)
                 entry["last"], entry["off"] = last, off
-                if limits and (not entry.get("limits") or
-                               limits.get("at", "") > entry["limits"].get("at", "")):
-                    entry["limits"] = limits
+                if limits:
+                    # 꼬리만 다시 읽어도 창별 최고치는 잃지 않게 합친다.
+                    old = entry.get("limits") or {}
+                    peaks = dict(old.get("peaks") or {})
+                    for key, pct in (limits.get("peaks") or {}).items():
+                        peaks[key] = max(peaks.get(key, 0.0), pct)
+                    if not old or limits.get("at", "") > old.get("at", ""):
+                        entry["limits"] = limits
+                    if peaks:
+                        entry["limits"]["peaks"] = peaks
                 entry["sz"], entry["mt"] = size, mtime
             else:
                 daily, last, limits, off = parse_codex_file(path)
