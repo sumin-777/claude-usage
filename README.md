@@ -30,8 +30,8 @@ Claude Code는 모든 세션을 `~/.claude/projects/<프로젝트>/<세션>.json
 
 ## 무엇이 수집되나
 
-**대화 내용, 프롬프트, 코드, 작업 파일 경로는 읽지도 저장하지도 않는다.**
-`message.usage` 의 토큰 수와 타임스탬프, 모델 이름만 본다.
+**대화 내용, 프롬프트, 코드, 작업 파일 경로는 수집하거나 저장하지 않는다.**
+Claude의 `message.usage`와 한도 거절 표시, Codex의 `token_count` 이벤트만 본다.
 
 다만 수집 JSON 에는 토큰 수치 말고도 다음이 들어간다.
 
@@ -42,8 +42,13 @@ Claude Code는 모든 세션을 `~/.claude/projects/<프로젝트>/<세션>.json
 | `source.root` | 트랜스크립트 디렉터리의 절대경로. **사용자 계정명이 포함된다** (`C:\Users\alice\.claude\projects`) |
 | `projects` | 프로젝트 이름. 경로의 마지막 조각만 남는다 (`-home-alice-work-myapp` → `myapp`) |
 | `tz` | 로컬 타임존 |
+| `codex` | Codex 토큰 수치, 요청 수, OpenAI가 기록한 한도 백분율·리셋 시각·플랜 라벨 |
+| `plan` | Claude 플랜·한도 등급·추가 사용 여부 등 요금제 라벨. 이메일·이름·계정/조직 ID는 절대 담지 않는다 |
+| `limit_hits` | Claude 요청이 한도에 걸린 시각·종류·리셋·상태와 해당 세션 ID·프로젝트 |
 
-세션은 개수만 세고 ID 는 담지 않는다.
+일반 사용량에서는 세션 수만 세며, 한도 거절 기록에만 어떤 작업이었는지 확인할
+수 있도록 세션 ID를 담는다. 새 `codex`·`plan`·`limit_hits` 필드에는 프롬프트,
+파일 경로, 이메일, 계정 ID를 담지 않는다.
 
 JSON 을 공유 폴더에 올리거나 남에게 보낼 때, 대시보드 스크린샷을 공유할 때는 위
 항목을 감안하라.
@@ -261,7 +266,14 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=https://<collector>/v1/metrics
   "models":  { "claude-opus-…": { "i":0,"o":0,"cw":0,"cr":0,"cw1":0,"cw5":0,"th":0,"m":0 } },
   "projects":{ "myapp": { "i":0,"o":0,"cw":0,"cr":0,"cw1":0,"cw5":0,"th":0,"m":0,"last":"2026-09-10" } },
   "hours":   [0, …24개],
-  "weekday_hour": [[…24개] ×7]
+  "weekday_hour": [[…24개] ×7],
+  "codex": { "daily": { "2026-09-10": { "i":0,"o":0,"cw":0,"cr":0,"th":0,"m":0 } },
+               "totals": { "i":0,"o":0,"cw":0,"cr":0,"th":0,"m":0,"total":0 },
+               "limits": { "at":"…", "plan":"prolite", "windows":[{"used_percent":0,"window_minutes":10080,"resets_at":0}] } },
+  "plan": { "organizationType":"claude_max", "organizationRateLimitTier":"default_claude_max_5x",
+             "hasExtraUsageEnabled":false, "seatTier":null, "userRateLimitTier":null, "billingType":null },
+  "limit_hits": [{ "requestId":"…", "timestamp":"…", "rateLimitType":"five_hour", "resetsAt":0,
+                    "status":"rejected", "isUsingOverage":false, "session":"…", "project":"myapp" }]
 }
 ```
 

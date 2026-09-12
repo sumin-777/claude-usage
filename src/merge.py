@@ -73,6 +73,9 @@ def merge(machines):
     weekday_hour = [[0] * 24 for _ in range(7)]
     totals = {k: 0 for k in KEYS}
     totals["sessions"] = 0
+    codex_daily = defaultdict(dict)
+    codex_limits = None
+    limit_hits = {}
 
     for d in machines:
         label = d["machine"]["label"]
@@ -98,6 +101,19 @@ def merge(machines):
         for k in KEYS:
             totals[k] += d.get("totals", {}).get(k, 0)
         totals["sessions"] += d.get("totals", {}).get("sessions", 0)
+        codex = d.get("codex")
+        if isinstance(codex, dict):
+            for day, b in codex.get("daily", {}).items():
+                merge_bucket(codex_daily[day], b)
+            limits = codex.get("limits")
+            if limits and (codex_limits is None or
+                           limits.get("at", "") > codex_limits.get("at", "")):
+                codex_limits = limits
+        for hit in d.get("limit_hits") or []:
+            key = (hit.get("requestId"), hit.get("timestamp"))
+            item = dict(hit)
+            item["machine"] = label
+            limit_hits[key] = item
 
     days = sorted(daily.keys())
     totals["total"] = sum(totals[k] for k in ("i", "o", "cw", "cr"))
@@ -112,7 +128,7 @@ def merge(machines):
             best = max(best, run)
         cur = run if (datetime.now().date() - dates[-1]).days <= 1 else 0
 
-    return {
+    out = {
         "schema": SCHEMA_VERSION,
         "kind": "merged",
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -123,6 +139,7 @@ def merge(machines):
                 "tz": m.get("tz"),
                 "range": m.get("range"),
                 "totals": m.get("totals"),
+                "plan": m.get("plan"),
             }
             for m in machines
         ],
@@ -141,6 +158,18 @@ def merge(machines):
         "hours": hours,
         "weekday_hour": weekday_hour,
     }
+    if codex_daily or codex_limits:
+        codex_totals = {k: 0 for k in KEYS}
+        for b in codex_daily.values():
+            merge_bucket(codex_totals, b)
+        codex_totals["total"] = sum(codex_totals[k] for k in ("i", "o", "cw", "cr"))
+        out["codex"] = {"daily": dict(codex_daily), "totals": codex_totals}
+        if codex_limits:
+            out["codex"]["limits"] = codex_limits
+    if limit_hits:
+        out["limit_hits"] = sorted(
+            limit_hits.values(), key=lambda x: x.get("timestamp", ""), reverse=True)[:200]
+    return out
 
 
 def main():

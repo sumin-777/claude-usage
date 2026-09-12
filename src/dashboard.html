@@ -225,6 +225,10 @@ table.ledger td.mut { color: var(--ink-mute); font-size: 12.5px; }
 .mini { height: 6px; background: var(--panel-sunk); border-radius: 3px; overflow: hidden; min-width: 60px; }
 .mini > i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
 .stale { color: var(--s2); }
+.badges { display:flex; flex-wrap:wrap; gap:4px; margin-top:4px; }
+.badge { font:10px var(--mono); color:var(--ink-mute); border:1px solid var(--rule); border-radius:999px; padding:1px 6px; }
+.limit-meter { margin:8px 0; }
+.limit-meter .mini { height:8px; margin-top:4px; }
 
 /* ---------- heatmap ---------- */
 .heat { display: grid; grid-template-columns: 26px repeat(24, 1fr); gap: 3px; align-items: center; }
@@ -282,6 +286,25 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
   <div class="banner" id="banner" hidden></div>
 
   <div class="stats" id="stats"></div>
+
+  <section id="codexSection" hidden>
+    <div class="sec-head">
+      <h2>Codex 사용량</h2>
+      <div class="note" id="codexNote"></div>
+    </div>
+    <div id="codexLimits"></div>
+    <div class="tbl-scroll"><table class="ledger" id="codexTable"></table></div>
+    <p class="hint">Codex 백분율은 OpenAI가 기록한 값입니다. Claude는 백분율 없이 거절된 순간만 기록합니다.</p>
+  </section>
+
+  <section id="limitSection" hidden>
+    <div class="sec-head">
+      <h2>한도에 걸린 기록</h2>
+      <div class="note" id="limitNote"></div>
+    </div>
+    <div class="tbl-scroll"><table class="ledger" id="limitTable"></table></div>
+    <p class="hint">Claude의 실시간 사용률이 아니라 요청이 거절된 순간의 기록입니다.</p>
+  </section>
 
   <section>
     <div class="sec-head">
@@ -655,7 +678,7 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
       msgs: msgs, sessions: sessions, models: models, projects: projects,
       hours: hours, wh: wh, streak: streak, best: best, approx: inWindow,
       first: active.length ? active[0].day : null,
-      last: active.length ? active[active.length - 1].day : null
+      last: active.length ? active[active.length - 1].day : null, from: from
     };
   }
 
@@ -669,6 +692,8 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
     renderHeader(D);
     renderChips();
     renderStats(D);
+    renderCodex(D);
+    renderLimitHits(D);
     renderDaily(D);
     renderContext(D);
     renderComp(D);
@@ -778,6 +803,98 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
       s.appendChild(el("span", "v", it[1]));
       if (it[2]) s.appendChild(el("span", "u", it[2]));
       box.appendChild(s);
+    });
+  }
+
+  function windowName(minutes) {
+    if (minutes === 10080) return "주간";
+    if (minutes === 300) return "5시간";
+    return comma(minutes) + "분";
+  }
+
+  function localTime(value) {
+    if (!value) return "—";
+    var d = typeof value === "number" ? new Date(value * 1000) : new Date(value);
+    return isNaN(d.getTime()) ? "—" : d.toLocaleString("ko-KR", {
+      month:"numeric", day:"numeric", hour:"2-digit", minute:"2-digit"
+    });
+  }
+
+  function renderCodex(D) {
+    var section = document.getElementById("codexSection");
+    var totals = {i:0, cr:0, cw:0, o:0, th:0, m:0}, newest = null, newestId = null;
+    D.ids.forEach(function (id) {
+      var C = state.machines[id].codex;
+      if (!C) return;
+      Object.keys(C.daily || {}).forEach(function (day) {
+        if (D.from && day < D.from) return;
+        var b = C.daily[day];
+        Object.keys(totals).forEach(function (k) { totals[k] += b[k] || 0; });
+      });
+      var l = C.limits;
+      if (l && (!newest || (l.at || "") > (newest.at || ""))) { newest = l; newestId = id; }
+    });
+    var has = totals.m || newest;
+    section.hidden = !has;
+    if (!has) return;
+    var limits = document.getElementById("codexLimits"); limits.textContent = "";
+    if (newest) {
+      (newest.windows || []).forEach(function (w) {
+        var stale = w.resets_at && w.resets_at * 1000 < Date.now();
+        var row = el("div", "limit-meter" + (stale ? " stale" : ""));
+        row.appendChild(el("div", null, windowName(w.window_minutes) + " " +
+          Number(w.used_percent || 0).toFixed(1) + "% · 리셋 " + localTime(w.resets_at) +
+          (newest.plan ? " · " + newest.plan : "") + " · " + localTime(newest.at) + " 기준" +
+          " · " + state.machines[newestId].machine.label + (stale ? " · 만료됨" : "")));
+        var mini = el("div", "mini"), fill = el("i");
+        fill.style.width = Math.max(0, Math.min(100, Number(w.used_percent || 0))) + "%";
+        mini.appendChild(fill); row.appendChild(mini); limits.appendChild(row);
+      });
+    }
+    var tbl = document.getElementById("codexTable"); tbl.textContent = "";
+    var head = el("tr"); ["구분", "토큰", "비고"].forEach(function (h, i) {
+      head.appendChild(el("th", i === 1 ? "r" : null, h));
+    }); tbl.appendChild(head);
+    [["입력", totals.i, "캐시 제외"], ["캐시된 입력", totals.cr, "입력의 부분집합"],
+     ["출력", totals.o, "그중 추론 " + comma(totals.th)],
+     ["요청", totals.m, "회"]].forEach(function (r) {
+      var tr = el("tr"); tr.appendChild(el("td", null, r[0]));
+      tr.appendChild(el("td", "r", comma(r[1]))); tr.appendChild(el("td", "mut", r[2])); tbl.appendChild(tr);
+    });
+    if (totals.cw) {
+      var tr = el("tr"); tr.appendChild(el("td", null, "캐시 쓰기"));
+      tr.appendChild(el("td", "r", comma(totals.cw))); tr.appendChild(el("td", "mut", "")); tbl.appendChild(tr);
+    }
+    document.getElementById("codexNote").textContent = D.from ? "선택 기간" : "전체 기간";
+  }
+
+  function renderLimitHits(D) {
+    var section = document.getElementById("limitSection"), hits = [];
+    D.ids.forEach(function (id) {
+      (state.machines[id].limit_hits || []).forEach(function (hit) {
+        if (D.from && (hit.timestamp || "").slice(0, 10) < D.from) return;
+        hits.push({hit:hit, id:id});
+      });
+    });
+    hits.sort(function (a, b) { return (b.hit.timestamp || "").localeCompare(a.hit.timestamp || ""); });
+    section.hidden = !hits.length;
+    if (!hits.length) return;
+    document.getElementById("limitNote").textContent = hits.length + "건";
+    var tbl = document.getElementById("limitTable"); tbl.textContent = "";
+    var head = el("tr"); ["시각", "창 종류", "리셋 시각", "추가 사용", "막힘 이유", "세션 · 프로젝트"].forEach(function (h) {
+      head.appendChild(el("th", null, h));
+    }); tbl.appendChild(head);
+    hits.forEach(function (x) {
+      var h = x.hit, tr = el("tr");
+      tr.appendChild(el("td", "mut", localTime(h.timestamp)));
+      tr.appendChild(el("td", null, h.rateLimitType === "five_hour" ? "5시간" :
+        h.rateLimitType === "weekly" ? "주간" : (h.rateLimitType || "—")));
+      tr.appendChild(el("td", "mut", localTime(h.resetsAt)));
+      tr.appendChild(el("td", null, h.isUsingOverage ? "사용" : "미사용"));
+      tr.appendChild(el("td", "mut", h.overageDisabledReason || h.overageStatus || h.status || "—"));
+      tr.appendChild(el("td", "mut", (h.session || "—") + " · " + (h.project || "—") +
+        " · " + state.machines[x.id].machine.label));
+      tbl.appendChild(tr);
     });
   }
 
@@ -1242,6 +1359,17 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
       var box = el("div");
       box.appendChild(document.createTextNode(M.machine.label));
       box.appendChild(el("small", null, M.machine.os || M.machine.hostname || ""));
+      if (M.plan) {
+        var badges = el("div", "badges");
+        var tier = String(M.plan.organizationRateLimitTier || "").match(/(\d+x)$/);
+        ["플랜 " + (M.plan.organizationType || "—"),
+         "한도 등급 " + (tier ? tier[1] : (M.plan.organizationRateLimitTier || "—")),
+         "엑스트라 " + (Object.prototype.hasOwnProperty.call(M.plan, "hasExtraUsageEnabled") ?
+           (M.plan.hasExtraUsageEnabled ? "on" : "off") : "—")].forEach(function (label) {
+          badges.appendChild(el("span", "badge", label));
+        });
+        box.appendChild(badges);
+      }
       nm.appendChild(box);
       td1.appendChild(nm);
       tr.appendChild(td1);
@@ -1335,6 +1463,13 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
         normalizeBucket(payload[group][key]);
       });
     });
+    if (payload.codex) {
+      normalizeBucket(payload.codex.totals);
+      Object.keys(payload.codex.daily || {}).forEach(function (day) {
+        normalizeBucket(payload.codex.daily[day]);
+      });
+    }
+    if (!Array.isArray(payload.limit_hits)) payload.limit_hits = [];
   }
 
   function ingest(payload, quiet) {

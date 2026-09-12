@@ -59,6 +59,10 @@ USAGE_FIELDS = LEGACY_USAGE_FIELDS + (
     (("output_tokens_details", "thinking_tokens"), "th"),
 )
 BUCKET_KEYS = ("i", "o", "cw", "cr", "cw1", "cw5", "th", "m")
+PLAN_FIELDS = (
+    "organizationType", "organizationRateLimitTier", "hasExtraUsageEnabled",
+    "seatTier", "userRateLimitTier", "billingType",
+)
 
 # 집계에서 제외할 model 값
 SKIP_MODELS = {"<synthetic>", "synthetic", None, ""}
@@ -156,6 +160,14 @@ def normalize_payload_usage(payload):
             if isinstance(bucket, dict):
                 for key in ("cw1", "cw5", "th"):
                     bucket.setdefault(key, 0)
+    codex = payload.get("codex")
+    if isinstance(codex, dict):
+        cdaily = codex.get("daily", {})
+        buckets = list(cdaily.values()) if isinstance(cdaily, dict) else []
+        for bucket in [codex.get("totals", {})] + buckets:
+            if isinstance(bucket, dict):
+                for key in BUCKET_KEYS:
+                    bucket.setdefault(key, 0)
     return payload
 
 
@@ -197,6 +209,160 @@ def bucket_total(b):
     return b["i"] + b["o"] + b["cw"] + b["cr"]
 
 
+def add_bucket(dst, src):
+    for key in BUCKET_KEYS:
+        dst[key] = dst.get(key, 0) + src.get(key, 0)
+
+
+def load_plan(claude_dir):
+    """~/.claude.json 의 공개 가능한 요금제 라벨만 읽는다."""
+    path = Path(str(Path(claude_dir).expanduser()) + ".json")
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            account = json.load(f).get("oauthAccount")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(account, dict):
+        return None
+    plan = {k: account[k] for k in PLAN_FIELDS if k in account}
+    return plan or None
+
+
+def quota_hit(rec, project, session):
+    q = rec.get("quotaLimits")
+    timestamp = rec.get("timestamp")
+    if not isinstance(q, dict) or not timestamp or parse_ts(timestamp) is None:
+        return None
+    hit = {"timestamp": timestamp, "session": session, "project": project}
+    for key in ("rateLimitType", "resetsAt", "status", "isUsingOverage",
+                "overageStatus", "overageDisabledReason"):
+        if key in q:
+            hit[key] = q[key]
+    hit["requestId"] = rec.get("requestId")
+    return hit
+
+
+def finish_limit_hits(hits, since=None, until=None):
+    """requestId+timestamp 로 중복 제거하고, 기간을 거른 뒤 최신 200건만 남긴다.
+
+    기간 판정은 일별 버킷과 같게 로컬 날짜 기준이다. 두 경로(전체/증분)가 여기
+    하나만 쓰므로 필터가 어긋나지 않는다.
+    """
+    best = {}
+    for hit in hits:
+        dt = parse_ts(hit.get("timestamp"))
+        if dt is not None and (since or until):
+            day = dt.astimezone().strftime("%Y-%m-%d")
+            if (since and day < since) or (until and day > until):
+                continue
+        best[(hit.get("requestId"), hit.get("timestamp"))] = hit
+    return sorted(best.values(), key=lambda x: x.get("timestamp", ""), reverse=True)[:200]
+
+
+def codex_bucket(last):
+    """Codex last_token_usage 를 기존 버킷 키로 옮긴다."""
+    b = new_bucket()
+    cached = usage_value(last, ("cached_input_tokens",))
+    b["i"] = max(0, usage_value(last, ("input_tokens",)) - cached)
+    b["cr"] = cached
+    b["cw"] = usage_value(last, ("cache_write_input_tokens",))
+    b["o"] = usage_value(last, ("output_tokens",))
+    b["th"] = usage_value(last, ("reasoning_output_tokens",))
+    b["m"] = 1
+    return b
+
+
+def parse_codex_file(path, start_off=0, previous_total=None):
+    """Codex JSONL 의 완결된 꼬리만 읽는다."""
+    daily = {}
+    newest = None
+    off = start_off
+    try:
+        fh = open(str(path), "rb")
+    except OSError:
+        return daily, previous_total, newest, start_off
+    with fh:
+        try:
+            fh.seek(start_off)
+        except OSError:
+            fh.seek(0)
+            off = 0
+        while True:
+            raw = fh.readline()
+            if not raw:
+                break
+            if not raw.endswith(b"\n"):
+                break
+            off += len(raw)
+            try:
+                rec = json.loads(raw.decode("utf-8", "replace"))
+            except ValueError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            payload = rec.get("payload", {})
+            if not isinstance(payload, dict):
+                continue
+            info = payload.get("info") if (rec.get("type") == "event_msg" and
+                                            payload.get("type") == "token_count") else None
+            if not isinstance(info, dict):
+                continue
+            timestamp = rec.get("timestamp")
+            dt = parse_ts(timestamp)
+            total = info.get("total_token_usage")
+            last = info.get("last_token_usage")
+            if dt is not None and isinstance(total, dict) and isinstance(last, dict) and total != previous_total:
+                day = dt.astimezone().strftime("%Y-%m-%d")
+                add_bucket(daily.setdefault(day, new_bucket()), codex_bucket(last))
+                previous_total = total
+            limits = payload.get("rate_limits")
+            if dt is not None and isinstance(limits, dict) and (newest is None or timestamp > newest["at"]):
+                windows = []
+                for name in ("primary", "secondary"):
+                    window = limits.get(name)
+                    if isinstance(window, dict):
+                        windows.append({k: window.get(k) for k in
+                                        ("used_percent", "window_minutes", "resets_at")})
+                newest = {"at": timestamp, "plan": limits.get("plan_type"), "windows": windows}
+    return daily, previous_total, newest, off
+
+
+def make_codex_payload(entries, since=None, until=None):
+    daily = {}
+    newest = None
+    for entry in entries:
+        for day, src in entry.get("daily", {}).items():
+            if (since and day < since) or (until and day > until):
+                continue
+            add_bucket(daily.setdefault(day, new_bucket()), src)
+        limit = entry.get("limits")
+        if limit and (newest is None or limit.get("at", "") > newest.get("at", "")):
+            newest = limit
+    if not daily and newest is None:
+        return None
+    totals = new_bucket()
+    for b in daily.values():
+        add_bucket(totals, b)
+    totals["total"] = bucket_total(totals)
+    out = {"daily": daily, "totals": totals}
+    if newest is not None:
+        out["limits"] = newest
+    return out
+
+
+def collect_codex(since=None, until=None):
+    root = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
+    if not root.is_dir():
+        return None
+    entries = []
+    for base in (root / "sessions", root / "archived_sessions"):
+        if base.is_dir():
+            for path in sorted(base.rglob("rollout-*.jsonl")):
+                daily, last, limits, off = parse_codex_file(path)
+                entries.append({"daily": daily, "last": last, "limits": limits, "off": off})
+    return make_codex_payload(entries, since, until)
+
+
 # ---------------------------------------------------------------- scanning
 
 
@@ -235,19 +401,17 @@ def iter_records(root, verbose=False):
                 if not isinstance(rec, dict):
                     continue
 
-                msg = rec.get("message")
-                if not isinstance(msg, dict):
-                    continue
-                usage = msg.get("usage")
-                if not isinstance(usage, dict):
-                    continue
-
-                model = msg.get("model") or rec.get("model")
-                if model in SKIP_MODELS:
-                    continue
-
                 dt = parse_ts(rec.get("timestamp"))
                 if dt is None:
+                    continue
+
+                msg = rec.get("message")
+                if not isinstance(msg, dict):
+                    msg = {}
+                usage = msg.get("usage")
+                model = msg.get("model") or rec.get("model")
+                hit = quota_hit(rec, project, rec.get("sessionId") or path.stem)
+                if (not isinstance(usage, dict) or model in SKIP_MODELS) and hit is None:
                     continue
 
                 # 중복 제거 키: 같은 assistant 응답이 세션 재개/포크 시
@@ -264,6 +428,7 @@ def iter_records(root, verbose=False):
                     "usage": usage,
                     "dedup": dedup,
                     "sidechain": bool(rec.get("isSidechain")),
+                    "limit_hit": hit,
                 }
 
 
@@ -282,8 +447,15 @@ def aggregate(root, since=None, until=None, verbose=False):
     seen = set()
     dup_count = 0
     kept = 0
+    limit_hits = []
 
     for rec in iter_records(root, verbose=verbose):
+        if rec["limit_hit"] is not None:
+            limit_hits.append(rec["limit_hit"])
+        # 한도 거절 레코드는 model 이 <synthetic> 이다. 기록만 줍고 사용량에는 넣지 않는다
+        # (이 필터가 빠지면 증분 경로와 어긋나 메시지 수가 부풀어 오른다).
+        if not isinstance(rec["usage"], dict) or rec["model"] in SKIP_MODELS:
+            continue
         key = rec["dedup"]
         if key:
             if key in seen:
@@ -335,6 +507,7 @@ def aggregate(root, since=None, until=None, verbose=False):
         "sessions": len(all_sessions),
         "records": kept,
         "duplicates": dup_count,
+        "limit_hits": finish_limit_hits(limit_hits, since, until),
     }
 
 
@@ -481,6 +654,14 @@ def build_payload(args):
     cost = estimate_cost(agg["models"], load_pricing(args.pricing))
     if cost:
         payload["cost_estimate"] = cost
+    plan = load_plan(args.claude_dir)
+    if plan:
+        payload["plan"] = plan
+    if agg["limit_hits"]:
+        payload["limit_hits"] = agg["limit_hits"]
+    codex = collect_codex(args.since, args.until)
+    if codex:
+        payload["codex"] = codex
 
     return payload
 
@@ -542,6 +723,27 @@ def print_summary(p):
         print(f"  주 사용 모델   {p['top_model']}")
     if p.get("cost_estimate"):
         print(f"  비용 추정      ${p['cost_estimate']['total']:,.2f} (사용자 단가표 기준)")
+    if p.get("plan"):
+        plan = p["plan"]
+        print("  Claude 요금제  %s / %s / 추가 사용 %s" % (
+            plan.get("organizationType", "-"), plan.get("organizationRateLimitTier", "-"),
+            ("켜짐" if plan.get("hasExtraUsageEnabled") else "꺼짐")
+            if "hasExtraUsageEnabled" in plan else "-"))
+    if p.get("limit_hits"):
+        print("  Claude 한도    거절 기록 %s건" % format(len(p["limit_hits"]), ","))
+    if p.get("codex"):
+        ct = p["codex"].get("totals", {})
+        print("  Codex 토큰     %s (요청 %s)" %
+              (human(ct.get("total", 0)), format(int(ct.get("m", 0)), ",")))
+        for window in p["codex"].get("limits", {}).get("windows", []):
+            mins = window.get("window_minutes") or 0
+            name = "주간" if mins == 10080 else ("5시간" if mins == 300 else "%s분" % mins)
+            try:
+                reset = datetime.fromtimestamp(int(window.get("resets_at"))).strftime("%m-%d %H:%M")
+            except (TypeError, ValueError):
+                reset = "-"
+            print("    %s 한도 %.1f%% / 리셋 %s" % (
+                name, float(window.get("used_percent") or 0), reset))
     print()
 
 
@@ -791,6 +993,10 @@ table.ledger td.mut { color: var(--ink-mute); font-size: 12.5px; }
 .mini { height: 6px; background: var(--panel-sunk); border-radius: 3px; overflow: hidden; min-width: 60px; }
 .mini > i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
 .stale { color: var(--s2); }
+.badges { display:flex; flex-wrap:wrap; gap:4px; margin-top:4px; }
+.badge { font:10px var(--mono); color:var(--ink-mute); border:1px solid var(--rule); border-radius:999px; padding:1px 6px; }
+.limit-meter { margin:8px 0; }
+.limit-meter .mini { height:8px; margin-top:4px; }
 
 /* ---------- heatmap ---------- */
 .heat { display: grid; grid-template-columns: 26px repeat(24, 1fr); gap: 3px; align-items: center; }
@@ -848,6 +1054,25 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
   <div class="banner" id="banner" hidden></div>
 
   <div class="stats" id="stats"></div>
+
+  <section id="codexSection" hidden>
+    <div class="sec-head">
+      <h2>Codex 사용량</h2>
+      <div class="note" id="codexNote"></div>
+    </div>
+    <div id="codexLimits"></div>
+    <div class="tbl-scroll"><table class="ledger" id="codexTable"></table></div>
+    <p class="hint">Codex 백분율은 OpenAI가 기록한 값입니다. Claude는 백분율 없이 거절된 순간만 기록합니다.</p>
+  </section>
+
+  <section id="limitSection" hidden>
+    <div class="sec-head">
+      <h2>한도에 걸린 기록</h2>
+      <div class="note" id="limitNote"></div>
+    </div>
+    <div class="tbl-scroll"><table class="ledger" id="limitTable"></table></div>
+    <p class="hint">Claude의 실시간 사용률이 아니라 요청이 거절된 순간의 기록입니다.</p>
+  </section>
 
   <section>
     <div class="sec-head">
@@ -1221,7 +1446,7 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
       msgs: msgs, sessions: sessions, models: models, projects: projects,
       hours: hours, wh: wh, streak: streak, best: best, approx: inWindow,
       first: active.length ? active[0].day : null,
-      last: active.length ? active[active.length - 1].day : null
+      last: active.length ? active[active.length - 1].day : null, from: from
     };
   }
 
@@ -1235,6 +1460,8 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
     renderHeader(D);
     renderChips();
     renderStats(D);
+    renderCodex(D);
+    renderLimitHits(D);
     renderDaily(D);
     renderContext(D);
     renderComp(D);
@@ -1344,6 +1571,98 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
       s.appendChild(el("span", "v", it[1]));
       if (it[2]) s.appendChild(el("span", "u", it[2]));
       box.appendChild(s);
+    });
+  }
+
+  function windowName(minutes) {
+    if (minutes === 10080) return "주간";
+    if (minutes === 300) return "5시간";
+    return comma(minutes) + "분";
+  }
+
+  function localTime(value) {
+    if (!value) return "—";
+    var d = typeof value === "number" ? new Date(value * 1000) : new Date(value);
+    return isNaN(d.getTime()) ? "—" : d.toLocaleString("ko-KR", {
+      month:"numeric", day:"numeric", hour:"2-digit", minute:"2-digit"
+    });
+  }
+
+  function renderCodex(D) {
+    var section = document.getElementById("codexSection");
+    var totals = {i:0, cr:0, cw:0, o:0, th:0, m:0}, newest = null, newestId = null;
+    D.ids.forEach(function (id) {
+      var C = state.machines[id].codex;
+      if (!C) return;
+      Object.keys(C.daily || {}).forEach(function (day) {
+        if (D.from && day < D.from) return;
+        var b = C.daily[day];
+        Object.keys(totals).forEach(function (k) { totals[k] += b[k] || 0; });
+      });
+      var l = C.limits;
+      if (l && (!newest || (l.at || "") > (newest.at || ""))) { newest = l; newestId = id; }
+    });
+    var has = totals.m || newest;
+    section.hidden = !has;
+    if (!has) return;
+    var limits = document.getElementById("codexLimits"); limits.textContent = "";
+    if (newest) {
+      (newest.windows || []).forEach(function (w) {
+        var stale = w.resets_at && w.resets_at * 1000 < Date.now();
+        var row = el("div", "limit-meter" + (stale ? " stale" : ""));
+        row.appendChild(el("div", null, windowName(w.window_minutes) + " " +
+          Number(w.used_percent || 0).toFixed(1) + "% · 리셋 " + localTime(w.resets_at) +
+          (newest.plan ? " · " + newest.plan : "") + " · " + localTime(newest.at) + " 기준" +
+          " · " + state.machines[newestId].machine.label + (stale ? " · 만료됨" : "")));
+        var mini = el("div", "mini"), fill = el("i");
+        fill.style.width = Math.max(0, Math.min(100, Number(w.used_percent || 0))) + "%";
+        mini.appendChild(fill); row.appendChild(mini); limits.appendChild(row);
+      });
+    }
+    var tbl = document.getElementById("codexTable"); tbl.textContent = "";
+    var head = el("tr"); ["구분", "토큰", "비고"].forEach(function (h, i) {
+      head.appendChild(el("th", i === 1 ? "r" : null, h));
+    }); tbl.appendChild(head);
+    [["입력", totals.i, "캐시 제외"], ["캐시된 입력", totals.cr, "입력의 부분집합"],
+     ["출력", totals.o, "그중 추론 " + comma(totals.th)],
+     ["요청", totals.m, "회"]].forEach(function (r) {
+      var tr = el("tr"); tr.appendChild(el("td", null, r[0]));
+      tr.appendChild(el("td", "r", comma(r[1]))); tr.appendChild(el("td", "mut", r[2])); tbl.appendChild(tr);
+    });
+    if (totals.cw) {
+      var tr = el("tr"); tr.appendChild(el("td", null, "캐시 쓰기"));
+      tr.appendChild(el("td", "r", comma(totals.cw))); tr.appendChild(el("td", "mut", "")); tbl.appendChild(tr);
+    }
+    document.getElementById("codexNote").textContent = D.from ? "선택 기간" : "전체 기간";
+  }
+
+  function renderLimitHits(D) {
+    var section = document.getElementById("limitSection"), hits = [];
+    D.ids.forEach(function (id) {
+      (state.machines[id].limit_hits || []).forEach(function (hit) {
+        if (D.from && (hit.timestamp || "").slice(0, 10) < D.from) return;
+        hits.push({hit:hit, id:id});
+      });
+    });
+    hits.sort(function (a, b) { return (b.hit.timestamp || "").localeCompare(a.hit.timestamp || ""); });
+    section.hidden = !hits.length;
+    if (!hits.length) return;
+    document.getElementById("limitNote").textContent = hits.length + "건";
+    var tbl = document.getElementById("limitTable"); tbl.textContent = "";
+    var head = el("tr"); ["시각", "창 종류", "리셋 시각", "추가 사용", "막힘 이유", "세션 · 프로젝트"].forEach(function (h) {
+      head.appendChild(el("th", null, h));
+    }); tbl.appendChild(head);
+    hits.forEach(function (x) {
+      var h = x.hit, tr = el("tr");
+      tr.appendChild(el("td", "mut", localTime(h.timestamp)));
+      tr.appendChild(el("td", null, h.rateLimitType === "five_hour" ? "5시간" :
+        h.rateLimitType === "weekly" ? "주간" : (h.rateLimitType || "—")));
+      tr.appendChild(el("td", "mut", localTime(h.resetsAt)));
+      tr.appendChild(el("td", null, h.isUsingOverage ? "사용" : "미사용"));
+      tr.appendChild(el("td", "mut", h.overageDisabledReason || h.overageStatus || h.status || "—"));
+      tr.appendChild(el("td", "mut", (h.session || "—") + " · " + (h.project || "—") +
+        " · " + state.machines[x.id].machine.label));
+      tbl.appendChild(tr);
     });
   }
 
@@ -1808,6 +2127,17 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
       var box = el("div");
       box.appendChild(document.createTextNode(M.machine.label));
       box.appendChild(el("small", null, M.machine.os || M.machine.hostname || ""));
+      if (M.plan) {
+        var badges = el("div", "badges");
+        var tier = String(M.plan.organizationRateLimitTier || "").match(/(\d+x)$/);
+        ["플랜 " + (M.plan.organizationType || "—"),
+         "한도 등급 " + (tier ? tier[1] : (M.plan.organizationRateLimitTier || "—")),
+         "엑스트라 " + (Object.prototype.hasOwnProperty.call(M.plan, "hasExtraUsageEnabled") ?
+           (M.plan.hasExtraUsageEnabled ? "on" : "off") : "—")].forEach(function (label) {
+          badges.appendChild(el("span", "badge", label));
+        });
+        box.appendChild(badges);
+      }
       nm.appendChild(box);
       td1.appendChild(nm);
       tr.appendChild(td1);
@@ -1901,6 +2231,13 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--rule);
         normalizeBucket(payload[group][key]);
       });
     });
+    if (payload.codex) {
+      normalizeBucket(payload.codex.totals);
+      Object.keys(payload.codex.daily || {}).forEach(function (day) {
+        normalizeBucket(payload.codex.daily[day]);
+      });
+    }
+    if (!Array.isArray(payload.limit_hits)) payload.limit_hits = [];
   }
 
   function ingest(payload, quiet) {
@@ -2175,7 +2512,8 @@ def load_remote(local_id=None):
 # 모델·세션 이름은 파일별 표에 두고 인덱스만 저장한다 (UUID 반복 제거).
 
 CACHE_DIR = STORE / "cache"
-CACHE_VERSION = 2
+CACHE_VERSION = 3
+CODEX_CACHE_VERSION = 1
 
 
 def _cache_path(rel):
@@ -2208,15 +2546,16 @@ def _save_dir_cache(dirname, data):
 
 
 def _read_rows(path, start_off, models, sessions):
-    """start_off 부터 완결된 줄만 파싱한다. (rows, 새 offset) 반환."""
+    """start_off 부터 완결된 줄만 파싱한다. (rows, 한도 기록, 새 offset) 반환."""
     rows = []
+    hits = []
     m_index = {n: i for i, n in enumerate(models)}
     s_index = {n: i for i, n in enumerate(sessions)}
     off = start_off
     try:
         fh = open(str(path), "rb")
     except OSError:
-        return rows, start_off
+        return rows, hits, start_off
     with fh:
         try:
             fh.seek(start_off)
@@ -2241,7 +2580,11 @@ def _read_rows(path, start_off, models, sessions):
                 continue
             msg = rec.get("message")
             if not isinstance(msg, dict):
-                continue
+                msg = {}
+            session = rec.get("sessionId") or path.stem
+            hit = quota_hit(rec, None, session)
+            if hit is not None:
+                hits.append(hit)
             usage = msg.get("usage")
             if not isinstance(usage, dict):
                 continue
@@ -2259,7 +2602,6 @@ def _read_rows(path, start_off, models, sessions):
             if model not in m_index:
                 m_index[model] = len(models)
                 models.append(model)
-            session = rec.get("sessionId") or path.stem
             if session not in s_index:
                 s_index[session] = len(sessions)
                 sessions.append(session)
@@ -2269,7 +2611,7 @@ def _read_rows(path, start_off, models, sessions):
                 dedup, local.strftime("%Y-%m-%d"), local.hour, local.weekday(),
                 m_index[model], s_index[session],
             ] + usage_values(usage))
-    return rows, off
+    return rows, hits, off
 
 
 def _dir_entries(root, dirname, paths, stats):
@@ -2299,17 +2641,18 @@ def _dir_entries(root, dirname, paths, stats):
             prev_off = entry["off"]
             models = entry.get("ms", [])
             sessions = entry.get("ss", [])
-            new_rows, off = _read_rows(path, prev_off, models, sessions)
+            new_rows, new_hits, off = _read_rows(path, prev_off, models, sessions)
             entry["r"] = entry.get("r", []) + new_rows
+            entry["q"] = entry.get("q", []) + new_hits
             entry["ms"], entry["ss"], entry["off"] = models, sessions, off
             entry["sz"], entry["mt"] = size, mtime
             stats["tail"] += 1
             stats["bytes"] += max(0, size - prev_off)
         else:
             models, sessions = [], []
-            rows, off = _read_rows(path, 0, models, sessions)
+            rows, hits, off = _read_rows(path, 0, models, sessions)
             entry = {"sz": size, "mt": mtime, "off": off,
-                     "ms": models, "ss": sessions, "r": rows}
+                     "ms": models, "ss": sessions, "r": rows, "q": hits}
             stats["full"] += 1
             stats["bytes"] += size
 
@@ -2330,6 +2673,67 @@ def _dir_entries(root, dirname, paths, stats):
 
 
 PAYLOAD_CACHE = STORE / "payload.json"
+CODEX_CACHE = STORE / "codex-cache.json"
+
+
+def _codex_entries():
+    """Codex 트리 하나를 append-only 캐시 하나로 읽는다."""
+    root = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
+    if not root.is_dir():
+        return []
+    try:
+        with CODEX_CACHE.open("r", encoding="utf-8") as f:
+            cache = _json.load(f)
+        if cache.get("v") != CODEX_CACHE_VERSION or cache.get("root") != str(root):
+            raise ValueError()
+    except (OSError, ValueError):
+        cache = {"v": CODEX_CACHE_VERSION, "root": str(root), "files": {}}
+    files = cache.get("files", {})
+    live = set()
+    dirty = False
+    for base in (root / "sessions", root / "archived_sessions"):
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("rollout-*.jsonl")):
+            try:
+                rel = str(path.relative_to(root))
+                st = path.stat()
+            except (OSError, ValueError):
+                continue
+            live.add(rel)
+            size, mtime = st.st_size, int(st.st_mtime)
+            entry = files.get(rel)
+            if entry and entry.get("sz") == size and entry.get("mt") == mtime:
+                continue
+            if entry and size >= entry.get("off", 0) and entry.get("off", 0) > 0:
+                daily, last, limits, off = parse_codex_file(
+                    path, entry["off"], entry.get("last"))
+                for day, bucket in daily.items():
+                    add_bucket(entry.setdefault("daily", {}).setdefault(day, new_bucket()), bucket)
+                entry["last"], entry["off"] = last, off
+                if limits and (not entry.get("limits") or
+                               limits.get("at", "") > entry["limits"].get("at", "")):
+                    entry["limits"] = limits
+                entry["sz"], entry["mt"] = size, mtime
+            else:
+                daily, last, limits, off = parse_codex_file(path)
+                entry = {"sz": size, "mt": mtime, "off": off, "last": last,
+                         "daily": daily, "limits": limits}
+            files[rel] = entry
+            dirty = True
+    for gone in [name for name in files if name not in live]:
+        del files[gone]
+        dirty = True
+    if dirty:
+        try:
+            STORE.mkdir(parents=True, exist_ok=True)
+            tmp = CODEX_CACHE.with_suffix(".tmp")
+            with tmp.open("w", encoding="utf-8") as f:
+                _json.dump(cache, f, separators=(",", ":"))
+            tmp.replace(CODEX_CACHE)
+        except OSError:
+            pass
+    return list(files.values())
 
 
 def _load_payload_cache(fp, args):
@@ -2341,7 +2745,8 @@ def _load_payload_cache(fp, args):
             d = _json.load(f)
     except (OSError, ValueError):
         return None
-    if d.get("fp") != list(fp) or d.get("schema_v") != SCHEMA_VERSION:
+    if (d.get("fp") != list(fp) or d.get("schema_v") != SCHEMA_VERSION or
+            d.get("cache_v") != CACHE_VERSION):
         return None
     pl = d.get("payload")
     if not pl or pl.get("machine", {}).get("label") != machine_identity(args.machine)["label"]:
@@ -2356,7 +2761,8 @@ def _save_payload_cache(fp, payload, args):
         STORE.mkdir(parents=True, exist_ok=True)
         tmp = PAYLOAD_CACHE.with_suffix(".tmp")
         with tmp.open("w", encoding="utf-8") as f:
-            _json.dump({"fp": list(fp), "schema_v": SCHEMA_VERSION, "payload": payload},
+            _json.dump({"fp": list(fp), "schema_v": SCHEMA_VERSION,
+                        "cache_v": CACHE_VERSION, "payload": payload},
                        f, ensure_ascii=False, separators=(",", ":"))
         tmp.replace(PAYLOAD_CACHE)
     except OSError:
@@ -2389,6 +2795,7 @@ def build_payload_incremental(args):
     seen = set()
     dups = 0
     kept = 0
+    limit_hits = []
     stats = {"reused": 0, "tail": 0, "full": 0, "bytes": 0, "dirs_written": 0}
 
     by_dir = {}
@@ -2408,6 +2815,10 @@ def build_payload_incremental(args):
             entries.append((pj, e))
 
     for pj, entry in entries:
+        for cached_hit in entry.get("q", []):
+            hit = dict(cached_hit)
+            hit["project"] = pj
+            limit_hits.append(hit)
         ms = entry.get("ms", [])
         ss = entry.get("ss", [])
         for r in entry.get("r", []):
@@ -2503,6 +2914,15 @@ def build_payload_incremental(args):
     cost = estimate_cost(models_agg, load_pricing(args.pricing))
     if cost:
         payload["cost_estimate"] = cost
+    plan = load_plan(args.claude_dir)
+    if plan:
+        payload["plan"] = plan
+    limit_hits = finish_limit_hits(limit_hits, args.since, args.until)
+    if limit_hits:
+        payload["limit_hits"] = limit_hits
+    codex = make_codex_payload(_codex_entries(), args.since, args.until)
+    if codex:
+        payload["codex"] = codex
     _save_payload_cache(fp, payload, args)
     return payload
 
@@ -2533,7 +2953,7 @@ def _rescan_interval():
 
 
 def _fingerprint(root):
-    """파일 개수·총 크기·최신 mtime. 내용을 읽지 않아 싸다."""
+    """Claude·Codex 파일 개수·총 크기·최신 mtime. 내용을 읽지 않아 싸다."""
     n = 0
     total = 0
     newest = 0.0
@@ -2549,7 +2969,28 @@ def _fingerprint(root):
                 newest = st.st_mtime
     except OSError:
         pass
-    return (n, total, int(newest))
+    codex_root = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
+    for base in (codex_root / "sessions", codex_root / "archived_sessions"):
+        try:
+            paths = base.rglob("rollout-*.jsonl") if base.is_dir() else []
+            for p in paths:
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                n += 1
+                total += st.st_size
+                newest = max(newest, st.st_mtime)
+        except OSError:
+            pass
+    plan = Path(str(root.parent) + ".json")
+    try:
+        st = plan.stat()
+        total += st.st_size
+        newest = max(newest, st.st_mtime)
+    except OSError:
+        pass
+    return (n, total, int(newest), str(codex_root))
 
 
 def _do_scan(args):
@@ -2923,6 +3364,10 @@ def _cache_size():
         total += PAYLOAD_CACHE.stat().st_size
     except OSError:
         pass
+    try:
+        total += CODEX_CACHE.stat().st_size
+    except OSError:
+        pass
     return total
 
 
@@ -2940,6 +3385,11 @@ def do_clear_cache(args):
         pass
     try:
         PAYLOAD_CACHE.unlink()
+    except OSError:
+        pass
+    try:
+        CODEX_CACHE.unlink()
+        n += 1
     except OSError:
         pass
     print(f"\n  캐시 {n}개 삭제, {freed/1e6:.0f}MB 확보.")

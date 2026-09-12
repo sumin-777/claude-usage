@@ -46,6 +46,10 @@ USAGE_FIELDS = LEGACY_USAGE_FIELDS + (
     (("output_tokens_details", "thinking_tokens"), "th"),
 )
 BUCKET_KEYS = ("i", "o", "cw", "cr", "cw1", "cw5", "th", "m")
+PLAN_FIELDS = (
+    "organizationType", "organizationRateLimitTier", "hasExtraUsageEnabled",
+    "seatTier", "userRateLimitTier", "billingType",
+)
 
 # 집계에서 제외할 model 값
 SKIP_MODELS = {"<synthetic>", "synthetic", None, ""}
@@ -143,6 +147,14 @@ def normalize_payload_usage(payload):
             if isinstance(bucket, dict):
                 for key in ("cw1", "cw5", "th"):
                     bucket.setdefault(key, 0)
+    codex = payload.get("codex")
+    if isinstance(codex, dict):
+        cdaily = codex.get("daily", {})
+        buckets = list(cdaily.values()) if isinstance(cdaily, dict) else []
+        for bucket in [codex.get("totals", {})] + buckets:
+            if isinstance(bucket, dict):
+                for key in BUCKET_KEYS:
+                    bucket.setdefault(key, 0)
     return payload
 
 
@@ -184,6 +196,160 @@ def bucket_total(b):
     return b["i"] + b["o"] + b["cw"] + b["cr"]
 
 
+def add_bucket(dst, src):
+    for key in BUCKET_KEYS:
+        dst[key] = dst.get(key, 0) + src.get(key, 0)
+
+
+def load_plan(claude_dir):
+    """~/.claude.json 의 공개 가능한 요금제 라벨만 읽는다."""
+    path = Path(str(Path(claude_dir).expanduser()) + ".json")
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            account = json.load(f).get("oauthAccount")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(account, dict):
+        return None
+    plan = {k: account[k] for k in PLAN_FIELDS if k in account}
+    return plan or None
+
+
+def quota_hit(rec, project, session):
+    q = rec.get("quotaLimits")
+    timestamp = rec.get("timestamp")
+    if not isinstance(q, dict) or not timestamp or parse_ts(timestamp) is None:
+        return None
+    hit = {"timestamp": timestamp, "session": session, "project": project}
+    for key in ("rateLimitType", "resetsAt", "status", "isUsingOverage",
+                "overageStatus", "overageDisabledReason"):
+        if key in q:
+            hit[key] = q[key]
+    hit["requestId"] = rec.get("requestId")
+    return hit
+
+
+def finish_limit_hits(hits, since=None, until=None):
+    """requestId+timestamp 로 중복 제거하고, 기간을 거른 뒤 최신 200건만 남긴다.
+
+    기간 판정은 일별 버킷과 같게 로컬 날짜 기준이다. 두 경로(전체/증분)가 여기
+    하나만 쓰므로 필터가 어긋나지 않는다.
+    """
+    best = {}
+    for hit in hits:
+        dt = parse_ts(hit.get("timestamp"))
+        if dt is not None and (since or until):
+            day = dt.astimezone().strftime("%Y-%m-%d")
+            if (since and day < since) or (until and day > until):
+                continue
+        best[(hit.get("requestId"), hit.get("timestamp"))] = hit
+    return sorted(best.values(), key=lambda x: x.get("timestamp", ""), reverse=True)[:200]
+
+
+def codex_bucket(last):
+    """Codex last_token_usage 를 기존 버킷 키로 옮긴다."""
+    b = new_bucket()
+    cached = usage_value(last, ("cached_input_tokens",))
+    b["i"] = max(0, usage_value(last, ("input_tokens",)) - cached)
+    b["cr"] = cached
+    b["cw"] = usage_value(last, ("cache_write_input_tokens",))
+    b["o"] = usage_value(last, ("output_tokens",))
+    b["th"] = usage_value(last, ("reasoning_output_tokens",))
+    b["m"] = 1
+    return b
+
+
+def parse_codex_file(path, start_off=0, previous_total=None):
+    """Codex JSONL 의 완결된 꼬리만 읽는다."""
+    daily = {}
+    newest = None
+    off = start_off
+    try:
+        fh = open(str(path), "rb")
+    except OSError:
+        return daily, previous_total, newest, start_off
+    with fh:
+        try:
+            fh.seek(start_off)
+        except OSError:
+            fh.seek(0)
+            off = 0
+        while True:
+            raw = fh.readline()
+            if not raw:
+                break
+            if not raw.endswith(b"\n"):
+                break
+            off += len(raw)
+            try:
+                rec = json.loads(raw.decode("utf-8", "replace"))
+            except ValueError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            payload = rec.get("payload", {})
+            if not isinstance(payload, dict):
+                continue
+            info = payload.get("info") if (rec.get("type") == "event_msg" and
+                                            payload.get("type") == "token_count") else None
+            if not isinstance(info, dict):
+                continue
+            timestamp = rec.get("timestamp")
+            dt = parse_ts(timestamp)
+            total = info.get("total_token_usage")
+            last = info.get("last_token_usage")
+            if dt is not None and isinstance(total, dict) and isinstance(last, dict) and total != previous_total:
+                day = dt.astimezone().strftime("%Y-%m-%d")
+                add_bucket(daily.setdefault(day, new_bucket()), codex_bucket(last))
+                previous_total = total
+            limits = payload.get("rate_limits")
+            if dt is not None and isinstance(limits, dict) and (newest is None or timestamp > newest["at"]):
+                windows = []
+                for name in ("primary", "secondary"):
+                    window = limits.get(name)
+                    if isinstance(window, dict):
+                        windows.append({k: window.get(k) for k in
+                                        ("used_percent", "window_minutes", "resets_at")})
+                newest = {"at": timestamp, "plan": limits.get("plan_type"), "windows": windows}
+    return daily, previous_total, newest, off
+
+
+def make_codex_payload(entries, since=None, until=None):
+    daily = {}
+    newest = None
+    for entry in entries:
+        for day, src in entry.get("daily", {}).items():
+            if (since and day < since) or (until and day > until):
+                continue
+            add_bucket(daily.setdefault(day, new_bucket()), src)
+        limit = entry.get("limits")
+        if limit and (newest is None or limit.get("at", "") > newest.get("at", "")):
+            newest = limit
+    if not daily and newest is None:
+        return None
+    totals = new_bucket()
+    for b in daily.values():
+        add_bucket(totals, b)
+    totals["total"] = bucket_total(totals)
+    out = {"daily": daily, "totals": totals}
+    if newest is not None:
+        out["limits"] = newest
+    return out
+
+
+def collect_codex(since=None, until=None):
+    root = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
+    if not root.is_dir():
+        return None
+    entries = []
+    for base in (root / "sessions", root / "archived_sessions"):
+        if base.is_dir():
+            for path in sorted(base.rglob("rollout-*.jsonl")):
+                daily, last, limits, off = parse_codex_file(path)
+                entries.append({"daily": daily, "last": last, "limits": limits, "off": off})
+    return make_codex_payload(entries, since, until)
+
+
 # ---------------------------------------------------------------- scanning
 
 
@@ -222,19 +388,17 @@ def iter_records(root, verbose=False):
                 if not isinstance(rec, dict):
                     continue
 
-                msg = rec.get("message")
-                if not isinstance(msg, dict):
-                    continue
-                usage = msg.get("usage")
-                if not isinstance(usage, dict):
-                    continue
-
-                model = msg.get("model") or rec.get("model")
-                if model in SKIP_MODELS:
-                    continue
-
                 dt = parse_ts(rec.get("timestamp"))
                 if dt is None:
+                    continue
+
+                msg = rec.get("message")
+                if not isinstance(msg, dict):
+                    msg = {}
+                usage = msg.get("usage")
+                model = msg.get("model") or rec.get("model")
+                hit = quota_hit(rec, project, rec.get("sessionId") or path.stem)
+                if (not isinstance(usage, dict) or model in SKIP_MODELS) and hit is None:
                     continue
 
                 # 중복 제거 키: 같은 assistant 응답이 세션 재개/포크 시
@@ -251,6 +415,7 @@ def iter_records(root, verbose=False):
                     "usage": usage,
                     "dedup": dedup,
                     "sidechain": bool(rec.get("isSidechain")),
+                    "limit_hit": hit,
                 }
 
 
@@ -269,8 +434,15 @@ def aggregate(root, since=None, until=None, verbose=False):
     seen = set()
     dup_count = 0
     kept = 0
+    limit_hits = []
 
     for rec in iter_records(root, verbose=verbose):
+        if rec["limit_hit"] is not None:
+            limit_hits.append(rec["limit_hit"])
+        # 한도 거절 레코드는 model 이 <synthetic> 이다. 기록만 줍고 사용량에는 넣지 않는다
+        # (이 필터가 빠지면 증분 경로와 어긋나 메시지 수가 부풀어 오른다).
+        if not isinstance(rec["usage"], dict) or rec["model"] in SKIP_MODELS:
+            continue
         key = rec["dedup"]
         if key:
             if key in seen:
@@ -322,6 +494,7 @@ def aggregate(root, since=None, until=None, verbose=False):
         "sessions": len(all_sessions),
         "records": kept,
         "duplicates": dup_count,
+        "limit_hits": finish_limit_hits(limit_hits, since, until),
     }
 
 
@@ -468,6 +641,14 @@ def build_payload(args):
     cost = estimate_cost(agg["models"], load_pricing(args.pricing))
     if cost:
         payload["cost_estimate"] = cost
+    plan = load_plan(args.claude_dir)
+    if plan:
+        payload["plan"] = plan
+    if agg["limit_hits"]:
+        payload["limit_hits"] = agg["limit_hits"]
+    codex = collect_codex(args.since, args.until)
+    if codex:
+        payload["codex"] = codex
 
     return payload
 
@@ -529,6 +710,27 @@ def print_summary(p):
         print(f"  주 사용 모델   {p['top_model']}")
     if p.get("cost_estimate"):
         print(f"  비용 추정      ${p['cost_estimate']['total']:,.2f} (사용자 단가표 기준)")
+    if p.get("plan"):
+        plan = p["plan"]
+        print("  Claude 요금제  %s / %s / 추가 사용 %s" % (
+            plan.get("organizationType", "-"), plan.get("organizationRateLimitTier", "-"),
+            ("켜짐" if plan.get("hasExtraUsageEnabled") else "꺼짐")
+            if "hasExtraUsageEnabled" in plan else "-"))
+    if p.get("limit_hits"):
+        print("  Claude 한도    거절 기록 %s건" % format(len(p["limit_hits"]), ","))
+    if p.get("codex"):
+        ct = p["codex"].get("totals", {})
+        print("  Codex 토큰     %s (요청 %s)" %
+              (human(ct.get("total", 0)), format(int(ct.get("m", 0)), ",")))
+        for window in p["codex"].get("limits", {}).get("windows", []):
+            mins = window.get("window_minutes") or 0
+            name = "주간" if mins == 10080 else ("5시간" if mins == 300 else "%s분" % mins)
+            try:
+                reset = datetime.fromtimestamp(int(window.get("resets_at"))).strftime("%m-%d %H:%M")
+            except (TypeError, ValueError):
+                reset = "-"
+            print("    %s 한도 %.1f%% / 리셋 %s" % (
+                name, float(window.get("used_percent") or 0), reset))
     print()
 
 

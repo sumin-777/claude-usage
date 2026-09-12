@@ -115,7 +115,8 @@ def load_remote(local_id=None):
 # 모델·세션 이름은 파일별 표에 두고 인덱스만 저장한다 (UUID 반복 제거).
 
 CACHE_DIR = STORE / "cache"
-CACHE_VERSION = 2
+CACHE_VERSION = 3
+CODEX_CACHE_VERSION = 1
 
 
 def _cache_path(rel):
@@ -148,15 +149,16 @@ def _save_dir_cache(dirname, data):
 
 
 def _read_rows(path, start_off, models, sessions):
-    """start_off 부터 완결된 줄만 파싱한다. (rows, 새 offset) 반환."""
+    """start_off 부터 완결된 줄만 파싱한다. (rows, 한도 기록, 새 offset) 반환."""
     rows = []
+    hits = []
     m_index = {n: i for i, n in enumerate(models)}
     s_index = {n: i for i, n in enumerate(sessions)}
     off = start_off
     try:
         fh = open(str(path), "rb")
     except OSError:
-        return rows, start_off
+        return rows, hits, start_off
     with fh:
         try:
             fh.seek(start_off)
@@ -181,7 +183,11 @@ def _read_rows(path, start_off, models, sessions):
                 continue
             msg = rec.get("message")
             if not isinstance(msg, dict):
-                continue
+                msg = {}
+            session = rec.get("sessionId") or path.stem
+            hit = quota_hit(rec, None, session)
+            if hit is not None:
+                hits.append(hit)
             usage = msg.get("usage")
             if not isinstance(usage, dict):
                 continue
@@ -199,7 +205,6 @@ def _read_rows(path, start_off, models, sessions):
             if model not in m_index:
                 m_index[model] = len(models)
                 models.append(model)
-            session = rec.get("sessionId") or path.stem
             if session not in s_index:
                 s_index[session] = len(sessions)
                 sessions.append(session)
@@ -209,7 +214,7 @@ def _read_rows(path, start_off, models, sessions):
                 dedup, local.strftime("%Y-%m-%d"), local.hour, local.weekday(),
                 m_index[model], s_index[session],
             ] + usage_values(usage))
-    return rows, off
+    return rows, hits, off
 
 
 def _dir_entries(root, dirname, paths, stats):
@@ -239,17 +244,18 @@ def _dir_entries(root, dirname, paths, stats):
             prev_off = entry["off"]
             models = entry.get("ms", [])
             sessions = entry.get("ss", [])
-            new_rows, off = _read_rows(path, prev_off, models, sessions)
+            new_rows, new_hits, off = _read_rows(path, prev_off, models, sessions)
             entry["r"] = entry.get("r", []) + new_rows
+            entry["q"] = entry.get("q", []) + new_hits
             entry["ms"], entry["ss"], entry["off"] = models, sessions, off
             entry["sz"], entry["mt"] = size, mtime
             stats["tail"] += 1
             stats["bytes"] += max(0, size - prev_off)
         else:
             models, sessions = [], []
-            rows, off = _read_rows(path, 0, models, sessions)
+            rows, hits, off = _read_rows(path, 0, models, sessions)
             entry = {"sz": size, "mt": mtime, "off": off,
-                     "ms": models, "ss": sessions, "r": rows}
+                     "ms": models, "ss": sessions, "r": rows, "q": hits}
             stats["full"] += 1
             stats["bytes"] += size
 
@@ -270,6 +276,67 @@ def _dir_entries(root, dirname, paths, stats):
 
 
 PAYLOAD_CACHE = STORE / "payload.json"
+CODEX_CACHE = STORE / "codex-cache.json"
+
+
+def _codex_entries():
+    """Codex 트리 하나를 append-only 캐시 하나로 읽는다."""
+    root = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
+    if not root.is_dir():
+        return []
+    try:
+        with CODEX_CACHE.open("r", encoding="utf-8") as f:
+            cache = _json.load(f)
+        if cache.get("v") != CODEX_CACHE_VERSION or cache.get("root") != str(root):
+            raise ValueError()
+    except (OSError, ValueError):
+        cache = {"v": CODEX_CACHE_VERSION, "root": str(root), "files": {}}
+    files = cache.get("files", {})
+    live = set()
+    dirty = False
+    for base in (root / "sessions", root / "archived_sessions"):
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("rollout-*.jsonl")):
+            try:
+                rel = str(path.relative_to(root))
+                st = path.stat()
+            except (OSError, ValueError):
+                continue
+            live.add(rel)
+            size, mtime = st.st_size, int(st.st_mtime)
+            entry = files.get(rel)
+            if entry and entry.get("sz") == size and entry.get("mt") == mtime:
+                continue
+            if entry and size >= entry.get("off", 0) and entry.get("off", 0) > 0:
+                daily, last, limits, off = parse_codex_file(
+                    path, entry["off"], entry.get("last"))
+                for day, bucket in daily.items():
+                    add_bucket(entry.setdefault("daily", {}).setdefault(day, new_bucket()), bucket)
+                entry["last"], entry["off"] = last, off
+                if limits and (not entry.get("limits") or
+                               limits.get("at", "") > entry["limits"].get("at", "")):
+                    entry["limits"] = limits
+                entry["sz"], entry["mt"] = size, mtime
+            else:
+                daily, last, limits, off = parse_codex_file(path)
+                entry = {"sz": size, "mt": mtime, "off": off, "last": last,
+                         "daily": daily, "limits": limits}
+            files[rel] = entry
+            dirty = True
+    for gone in [name for name in files if name not in live]:
+        del files[gone]
+        dirty = True
+    if dirty:
+        try:
+            STORE.mkdir(parents=True, exist_ok=True)
+            tmp = CODEX_CACHE.with_suffix(".tmp")
+            with tmp.open("w", encoding="utf-8") as f:
+                _json.dump(cache, f, separators=(",", ":"))
+            tmp.replace(CODEX_CACHE)
+        except OSError:
+            pass
+    return list(files.values())
 
 
 def _load_payload_cache(fp, args):
@@ -281,7 +348,8 @@ def _load_payload_cache(fp, args):
             d = _json.load(f)
     except (OSError, ValueError):
         return None
-    if d.get("fp") != list(fp) or d.get("schema_v") != SCHEMA_VERSION:
+    if (d.get("fp") != list(fp) or d.get("schema_v") != SCHEMA_VERSION or
+            d.get("cache_v") != CACHE_VERSION):
         return None
     pl = d.get("payload")
     if not pl or pl.get("machine", {}).get("label") != machine_identity(args.machine)["label"]:
@@ -296,7 +364,8 @@ def _save_payload_cache(fp, payload, args):
         STORE.mkdir(parents=True, exist_ok=True)
         tmp = PAYLOAD_CACHE.with_suffix(".tmp")
         with tmp.open("w", encoding="utf-8") as f:
-            _json.dump({"fp": list(fp), "schema_v": SCHEMA_VERSION, "payload": payload},
+            _json.dump({"fp": list(fp), "schema_v": SCHEMA_VERSION,
+                        "cache_v": CACHE_VERSION, "payload": payload},
                        f, ensure_ascii=False, separators=(",", ":"))
         tmp.replace(PAYLOAD_CACHE)
     except OSError:
@@ -329,6 +398,7 @@ def build_payload_incremental(args):
     seen = set()
     dups = 0
     kept = 0
+    limit_hits = []
     stats = {"reused": 0, "tail": 0, "full": 0, "bytes": 0, "dirs_written": 0}
 
     by_dir = {}
@@ -348,6 +418,10 @@ def build_payload_incremental(args):
             entries.append((pj, e))
 
     for pj, entry in entries:
+        for cached_hit in entry.get("q", []):
+            hit = dict(cached_hit)
+            hit["project"] = pj
+            limit_hits.append(hit)
         ms = entry.get("ms", [])
         ss = entry.get("ss", [])
         for r in entry.get("r", []):
@@ -443,6 +517,15 @@ def build_payload_incremental(args):
     cost = estimate_cost(models_agg, load_pricing(args.pricing))
     if cost:
         payload["cost_estimate"] = cost
+    plan = load_plan(args.claude_dir)
+    if plan:
+        payload["plan"] = plan
+    limit_hits = finish_limit_hits(limit_hits, args.since, args.until)
+    if limit_hits:
+        payload["limit_hits"] = limit_hits
+    codex = make_codex_payload(_codex_entries(), args.since, args.until)
+    if codex:
+        payload["codex"] = codex
     _save_payload_cache(fp, payload, args)
     return payload
 
@@ -473,7 +556,7 @@ def _rescan_interval():
 
 
 def _fingerprint(root):
-    """파일 개수·총 크기·최신 mtime. 내용을 읽지 않아 싸다."""
+    """Claude·Codex 파일 개수·총 크기·최신 mtime. 내용을 읽지 않아 싸다."""
     n = 0
     total = 0
     newest = 0.0
@@ -489,7 +572,28 @@ def _fingerprint(root):
                 newest = st.st_mtime
     except OSError:
         pass
-    return (n, total, int(newest))
+    codex_root = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
+    for base in (codex_root / "sessions", codex_root / "archived_sessions"):
+        try:
+            paths = base.rglob("rollout-*.jsonl") if base.is_dir() else []
+            for p in paths:
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                n += 1
+                total += st.st_size
+                newest = max(newest, st.st_mtime)
+        except OSError:
+            pass
+    plan = Path(str(root.parent) + ".json")
+    try:
+        st = plan.stat()
+        total += st.st_size
+        newest = max(newest, st.st_mtime)
+    except OSError:
+        pass
+    return (n, total, int(newest), str(codex_root))
 
 
 def _do_scan(args):
@@ -863,6 +967,10 @@ def _cache_size():
         total += PAYLOAD_CACHE.stat().st_size
     except OSError:
         pass
+    try:
+        total += CODEX_CACHE.stat().st_size
+    except OSError:
+        pass
     return total
 
 
@@ -880,6 +988,11 @@ def do_clear_cache(args):
         pass
     try:
         PAYLOAD_CACHE.unlink()
+    except OSError:
+        pass
+    try:
+        CODEX_CACHE.unlink()
+        n += 1
     except OSError:
         pass
     print(f"\n  캐시 {n}개 삭제, {freed/1e6:.0f}MB 확보.")
